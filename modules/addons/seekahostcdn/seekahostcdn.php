@@ -216,21 +216,23 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
             . '<td class="text-right">' . $e($money($cost)) . '</td>'
             . '<td class="text-right">' . $e($money($price)) . '</td>'
             . '<td class="text-right" style="color:' . ($margin >= 0 ? '#3c763d' : '#a94442') . '">' . $e($money($margin)) . '</td>'
+            . '<td class="text-right">' . ($price > 0 ? round($margin / $price * 100) . '%' : '-') . '</td>'
             . '<td>' . ($snap ? $e(date('j M H:i', strtotime($snap->updated_at ?: $snap->usage_date))) : '<span class="text-muted">never</span>') . '</td>'
             . '</tr>';
     }
 
     $margin = $totPrice - $totCost;
-    echo '<div class="row">';
+    echo '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">';
     foreach ([
         ['CDN services', count($rows)],
         ['Bandwidth this month', $cdn::formatBytes($totBytes)],
         ['bunny.net cost (MTD)', $money($totCost)],
         ['Our price (MTD)', $money($totPrice)],
-        ['Margin (MTD)', $money($margin)],
+        ['Margin (MTD)' . ($totPrice > 0 ? ' · ' . round($margin / $totPrice * 100) . '%' : ''), $money($margin)],
     ] as $tile) {
-        echo '<div class="col-md-2 col-sm-4"><div class="panel panel-default"><div class="panel-body text-center"><div style="font-size:22px;font-weight:600">'
-            . $e($tile[1]) . '</div><small class="text-muted">' . $e($tile[0]) . '</small></div></div></div>';
+        echo '<div style="flex:1 1 170px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px">'
+            . '<div class="text-muted" style="font-size:12px">' . $e($tile[0]) . '</div>'
+            . '<div style="font-size:22px;font-weight:600;white-space:nowrap">' . $e($tile[1]) . '</div></div>';
     }
     echo '</div>';
 
@@ -242,8 +244,8 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
 
     echo '<div class="table-responsive"><table class="table table-striped table-condensed"><thead><tr>'
         . '<th>Service</th><th>Client</th><th>Domain</th><th>Status</th><th class="text-right">Bandwidth (MTD)</th>'
-        . '<th class="text-right">bunny.net cost</th><th class="text-right">Our price</th><th class="text-right">Margin</th><th>Last sync</th>'
-        . '</tr></thead><tbody>' . ($body ?: '<tr><td colspan="9" class="text-muted">No CDN services yet.</td></tr>') . '</tbody></table></div>';
+        . '<th class="text-right">bunny.net cost</th><th class="text-right">Our price</th><th class="text-right">Margin</th><th class="text-right">Margin %</th><th>Last sync</th>'
+        . '</tr></thead><tbody>' . ($body ?: '<tr><td colspan="10" class="text-muted">No CDN services yet.</td></tr>') . '</tbody></table></div>';
 }
 
 function seekahostcdn_adminBilling($link, $token, $e, $money)

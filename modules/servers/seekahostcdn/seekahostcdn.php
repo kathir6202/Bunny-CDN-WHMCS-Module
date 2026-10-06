@@ -301,6 +301,15 @@ function seekahostcdn_clientStats($row, BunnyClient $bunny, array $params, $rang
         $chart[] = ['date' => substr((string) $date, 0, 10), 'bytes' => (int) $value];
     }
 
+    // Show the whole month so the chart fills up as the month goes on
+    $axisTo = $to;
+    if ($range === 'month') {
+        $axisTo = date('Y-m-t');
+        for ($d = strtotime($to . ' +1 day'); $d <= strtotime($axisTo); $d += 86400) {
+            $chart[] = ['date' => date('Y-m-d', $d), 'bytes' => null];
+        }
+    }
+
     $limit = CDN::limitBytes($params);
     $monthBytes = $bytes;
     if ($range !== 'month' && $limit > 0) {
@@ -312,7 +321,7 @@ function seekahostcdn_clientStats($row, BunnyClient $bunny, array $params, $rang
         'success' => true,
         'range' => $range,
         'from' => $from,
-        'to' => $to,
+        'to' => $axisTo,
         'bandwidth' => CDN::formatBytes($bytes),
         'bandwidthGb' => number_format(CDN::bytesToGb($bytes), 2),
         'requests' => number_format((int) ($stats['TotalRequestsServed'] ?? 0)),
