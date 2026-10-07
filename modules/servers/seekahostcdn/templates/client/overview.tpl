@@ -332,9 +332,9 @@
     }
 
     function ttlText(s) {
-        if (s >= 86400 && s % 86400 === 0) return (s / 86400) + (s === 86400 ? ' day' : ' days');
-        if (s >= 3600 && s % 3600 === 0) return (s / 3600) + (s === 3600 ? ' hour' : ' hours');
-        if (s >= 60 && s % 60 === 0) return (s / 60) + ' min';
+        if (s >= 86400) return Math.round(s / 86400) + (Math.round(s / 86400) === 1 ? ' day' : ' days');
+        if (s >= 3540) return Math.round(s / 3600) + (Math.round(s / 3600) === 1 ? ' hour' : ' hours');
+        if (s >= 60) return Math.round(s / 60) + ' min';
         return s + 's';
     }
 

@@ -732,6 +732,38 @@ class Module
         ];
     }
 
+    // ========================================================== Nameservers
+
+    /**
+     * True when the domain's public NS records are bunny.net's. bunny.net's own
+     * "NameserversDetected" flag is not reliable for this (it is set on new zones).
+     */
+    public static function nameserversPointed($domain, array $zone = [])
+    {
+        if (!function_exists('dns_get_record')) {
+            return false;
+        }
+        $expected = array_filter(array_map(function ($ns) {
+            return strtolower(rtrim((string) $ns, '.'));
+        }, [$zone['Nameserver1'] ?? '', $zone['Nameserver2'] ?? '']));
+
+        $found = [];
+        foreach ((array) @dns_get_record($domain, DNS_NS) as $r) {
+            if (!empty($r['target'])) {
+                $found[] = strtolower(rtrim($r['target'], '.'));
+            }
+        }
+        if (!$found) {
+            return false;
+        }
+        foreach ($found as $ns) {
+            if (!in_array($ns, $expected, true) && substr($ns, -strlen('.bunny.net')) !== '.bunny.net') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // =================================================================== SSL
 
     /**
@@ -742,7 +774,7 @@ class Module
     {
         $bunny = $bunny ?: self::clientForService($row->service_id);
         $zone = $bunny->getDnsZone($row->dns_zone_id);
-        $detected = !empty($zone['NameserversDetected']);
+        $detected = self::nameserversPointed($row->domain, $zone);
 
         $hostnames = self::decodeList($row->hostnames);
         $done = self::decodeList($row->ssl_hostnames);

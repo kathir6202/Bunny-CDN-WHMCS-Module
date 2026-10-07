@@ -442,7 +442,7 @@ function seekahostcdn_ClientArea(array $params)
         $bunny = CDN::clientForParams($params);
         $zone = $bunny->getDnsZone($row->dns_zone_id);
         $records = CDN::presentRecords(is_array($zone['Records'] ?? null) ? $zone['Records'] : []);
-        $detected = !empty($zone['NameserversDetected']);
+        $detected = CDN::nameserversPointed($row->domain, $zone);
         $ns1 = $zone['Nameserver1'] ?? $ns1;
         $ns2 = $zone['Nameserver2'] ?? $ns2;
         if ($detected != $row->nameservers_detected || $ns1 !== $row->nameserver_1 || $ns2 !== $row->nameserver_2) {

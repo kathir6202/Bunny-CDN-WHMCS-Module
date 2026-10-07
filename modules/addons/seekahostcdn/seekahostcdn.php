@@ -26,7 +26,7 @@ function seekahostcdn_config()
     return [
         'name' => 'SeekaHost CDN',
         'description' => 'bunny.net CDN reselling: per-GB pricing, monthly usage invoices and cost/margin reports.',
-        'version' => '2.0.0',
+        'version' => '2.0.1',
         'author' => 'SeekaHost',
         'language' => 'english',
         'fields' => [
