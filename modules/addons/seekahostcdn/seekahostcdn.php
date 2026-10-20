@@ -26,7 +26,7 @@ function seekahostcdn_config()
     return [
         'name' => 'SeekaHost CDN',
         'description' => 'bunny.net CDN reselling: per-GB pricing, monthly usage invoices and cost/margin reports.',
-        'version' => '2.0.0',
+        'version' => '2.1.0',
         'author' => 'SeekaHost',
         'language' => 'english',
         'fields' => [
@@ -66,6 +66,60 @@ function seekahostcdn_config()
                 'FriendlyName' => 'Apply Tax',
                 'Type' => 'yesno',
                 'Description' => 'Mark usage invoice lines as taxable.',
+            ],
+            'price_per_gb_storage' => [
+                'FriendlyName' => 'Storage Price per GB / month',
+                'Type' => 'text',
+                'Size' => '10',
+                'Default' => '0',
+                'Description' => 'For services with a storage zone. Billed on the month\'s peak storage. 0 = free.',
+            ],
+            'warn_percent' => [
+                'FriendlyName' => 'Bandwidth Warning at (%)',
+                'Type' => 'text',
+                'Size' => '5',
+                'Default' => '80',
+                'Description' => 'Email the client once a month when usage passes this percentage of their limit.',
+            ],
+            'overage_action' => [
+                'FriendlyName' => 'When the Limit is Reached',
+                'Type' => 'dropdown',
+                'Options' => [
+                    'notify' => 'Email client + admin To-Do (bunny.net pauses the zone)',
+                    'suspend' => 'Also suspend the service in WHMCS',
+                ],
+                'Default' => 'notify',
+            ],
+            'auto_unsuspend' => [
+                'FriendlyName' => 'Auto-Unsuspend Next Month',
+                'Type' => 'yesno',
+                'Default' => 'on',
+                'Description' => 'Lift bandwidth suspensions automatically when the new month starts.',
+            ],
+            'included_products' => [
+                'FriendlyName' => 'Include Free CDN with Products',
+                'Type' => 'text',
+                'Size' => '40',
+                'Description' => 'Comma-separated hosting product IDs that get a CDN automatically when created (e.g. 3,7,12).',
+            ],
+            'included_mode' => [
+                'FriendlyName' => 'Included CDN Setup Mode',
+                'Type' => 'dropdown',
+                'Options' => 'CNAME only,Nameservers (full DNS)',
+                'Default' => 'CNAME only',
+                'Description' => 'CNAME is safest for hosting customers whose DNS is managed elsewhere.',
+            ],
+            'included_limit_gb' => [
+                'FriendlyName' => 'Included CDN Bandwidth (GB)',
+                'Type' => 'text',
+                'Size' => '10',
+                'Default' => '0',
+                'Description' => 'Monthly limit for included CDNs. 0 = unlimited.',
+            ],
+            'included_bill' => [
+                'FriendlyName' => 'Bill Included CDN Usage',
+                'Type' => 'yesno',
+                'Description' => 'Also invoice per-GB usage for included CDNs (otherwise free up to the limit).',
             ],
         ],
     ];
@@ -139,6 +193,29 @@ function seekahostcdn_output($vars)
                             echo '<div class="alert alert-warning">' . $e($err) . '</div>';
                         }
                         break;
+                    case 'link':
+                        $cdn::linkExistingZone((int) ($_POST['service_id'] ?? 0), (int) ($_POST['pull_zone_id'] ?? 0), (int) ($_POST['server_id'] ?? 0));
+                        echo '<div class="alert alert-success">Pull zone ' . (int) $_POST['pull_zone_id'] . ' is now linked to service #' . (int) $_POST['service_id'] . '.</div>';
+                        break;
+                    case 'include_existing':
+                        $done = 0;
+                        $errs = [];
+                        $ids = $cdn::includedProductIds();
+                        $services = $ids ? Capsule::table('tblhosting')->whereIn('packageid', $ids)->where('domainstatus', 'Active')
+                            ->whereNotIn('id', Capsule::table('mod_seekahostcdn_dns_zones')->pluck('service_id')->toArray())->limit(25)->get() : [];
+                        foreach ($services as $svc) {
+                            try {
+                                $cdn::provision($cdn::includedParams($svc->id));
+                                $done++;
+                            } catch (Exception $ex) {
+                                $errs[] = "#{$svc->id} {$svc->domain}: " . $ex->getMessage();
+                            }
+                        }
+                        echo '<div class="alert alert-success">Created ' . $done . ' included CDN(s). Run again to continue with the next 25.</div>';
+                        foreach ($errs as $err) {
+                            echo '<div class="alert alert-warning">' . $e($err) . '</div>';
+                        }
+                        break;
                     case 'retry':
                         $id = (int) ($_POST['billing_id'] ?? 0);
                         $bill = Capsule::table('mod_seekahostcdn_billing')->where('id', $id)->where('status', 'failed')->first();
@@ -158,7 +235,7 @@ function seekahostcdn_output($vars)
         }
     }
 
-    $tabs = ['dashboard' => 'Zones & Margin', 'billing' => 'Billing History', 'help' => 'Setup'];
+    $tabs = ['dashboard' => 'Zones & Margin', 'billing' => 'Billing History', 'import' => 'Import Zones', 'help' => 'Setup'];
     echo '<ul class="nav nav-tabs" style="margin-bottom:20px">';
     foreach ($tabs as $key => $label) {
         echo '<li class="' . ($tab === $key ? 'active' : '') . '"><a href="' . $e($link . '&tab=' . $key) . '">' . $e($label) . '</a></li>';
@@ -167,8 +244,10 @@ function seekahostcdn_output($vars)
 
     if ($tab === 'billing') {
         seekahostcdn_adminBilling($link, $token, $e, $money);
+    } elseif ($tab === 'import') {
+        seekahostcdn_adminImport($link, $token, $cdn, $e);
     } elseif ($tab === 'help') {
-        seekahostcdn_adminHelp($cdn, $e, $money);
+        seekahostcdn_adminHelp($cdn, $e, $money, $link, $token);
     } else {
         seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money);
     }
@@ -199,7 +278,7 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
         $snap = $snapshots[$r->service_id] ?? null;
         $bytes = $snap ? (int) $snap->bandwidth_bytes : 0;
         $cost = $snap ? (float) $snap->cost : 0.0;
-        $price = $cdn::priceForBytes($bytes);
+        $price = $cdn::isBillable($r) ? $cdn::priceForBytes($bytes) : 0;
         $margin = $price - $cost;
         $totBytes += $bytes;
         $totCost += $cost;
@@ -211,7 +290,11 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
             . '<td><a href="clientssummary.php?userid=' . (int) $r->userid . '">' . $e($client) . '</a></td>'
             . '<td>' . $e($r->domain) . '</td>'
             . '<td><span class="label label-' . ($status === 'Active' ? 'success' : 'warning') . '">' . $e($status) . '</span> '
-            . ($r->nameservers_detected ? '<span class="label label-info">NS pointed</span>' : '<span class="label label-default">NS pending</span>') . '</td>'
+            . ($r->nameservers_detected
+                ? '<span class="label label-info">' . (($r->mode ?? 'dns') === 'cname' ? 'CNAME ok' : 'NS pointed') . '</span>'
+                : '<span class="label label-default">' . (($r->mode ?? 'dns') === 'cname' ? 'CNAME pending' : 'NS pending') . '</span>')
+            . (($r->source ?? 'product') !== 'product' ? ' <span class="label label-primary">' . (($r->source === 'addon') ? 'Addon' : 'Included') . '</span>' : '')
+            . (!empty($r->storage_zone_id) ? ' <span class="label label-default">Storage</span>' : '') . '</td>'
             . '<td class="text-right">' . $e($cdn::formatBytes($bytes)) . '</td>'
             . '<td class="text-right">' . $e($money($cost)) . '</td>'
             . '<td class="text-right">' . $e($money($price)) . '</td>'
@@ -314,7 +397,58 @@ function seekahostcdn_adminBilling($link, $token, $e, $money)
     echo '<p class="text-muted small">bunny.net cost per month comes from the last daily usage snapshot of that month, so the final day may be slightly under-counted.</p>';
 }
 
-function seekahostcdn_adminHelp($cdn, $e, $money)
+function seekahostcdn_adminImport($link, $token, $cdn, $e)
+{
+    $servers = Capsule::table('tblservers')->where('type', 'seekahostcdn')->where('disabled', 0)->orderBy('id')->get();
+    if (count($servers) === 0) {
+        echo '<div class="alert alert-warning">Add a SeekaHost CDN server first (System Settings &gt; Servers).</div>';
+        return;
+    }
+    $serverId = (int) ($_GET['server'] ?? $servers[0]->id);
+    if (count($servers) > 1) {
+        echo '<form method="get" class="form-inline" style="margin-bottom:12px"><input type="hidden" name="module" value="seekahostcdn"><input type="hidden" name="tab" value="import">'
+            . '<label>bunny.net account&nbsp;</label><select name="server" class="form-control" onchange="this.form.submit()">';
+        foreach ($servers as $srv) {
+            echo '<option value="' . (int) $srv->id . '"' . ($srv->id == $serverId ? ' selected' : '') . '>' . $e($srv->name) . '</option>';
+        }
+        echo '</select></form>';
+    }
+
+    try {
+        $zones = $cdn::unlinkedPullZones(new SeekahostCDN\BunnyClient($cdn::apiKeyForServer($serverId)));
+    } catch (Exception $ex) {
+        echo '<div class="alert alert-danger">' . $e($ex->getMessage()) . '</div>';
+        return;
+    }
+
+    echo '<p class="text-muted">Pull zones in your bunny.net account that are not linked to WHMCS. Link one to an existing service '
+        . '(a CDN product, or a hosting service to treat it as an included CDN). Its DNS zone is linked automatically if the domain is in bunny.net DNS.</p>';
+    if (!$zones) {
+        echo '<div class="alert alert-info">Every pull zone in this account is already linked.</div>';
+        return;
+    }
+    echo '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Pull zone</th><th>Hostnames</th><th>Origin</th><th style="width:330px">Link to service ID</th></tr></thead><tbody>';
+    foreach ($zones as $z) {
+        $hint = '';
+        if ($z['hostnames']) {
+            $svc = Capsule::table('tblhosting')->whereIn('domain', array_merge($z['hostnames'], array_map(function ($h) {
+                return preg_replace('/^www\./', '', $h);
+            }, $z['hostnames'])))->orderBy('id', 'desc')->first();
+            $hint = $svc ? (int) $svc->id : '';
+        }
+        echo '<tr><td><strong>' . $e($z['name']) . '</strong><br><small class="text-muted">#' . (int) $z['id'] . '</small></td>'
+            . '<td>' . ($z['hostnames'] ? $e(implode(', ', $z['hostnames'])) : '<span class="text-muted">none</span>') . '</td>'
+            . '<td><small>' . ($z['storageZoneId'] ? 'storage zone #' . (int) $z['storageZoneId'] : $e($z['origin'])) . '</small></td>'
+            . '<td><form method="post" action="' . $e($link . '&tab=import&server=' . $serverId) . '" class="form-inline">'
+            . '<input type="hidden" name="token" value="' . $e($token) . '"><input type="hidden" name="shcdn_admin" value="link">'
+            . '<input type="hidden" name="pull_zone_id" value="' . (int) $z['id'] . '"><input type="hidden" name="server_id" value="' . $serverId . '">'
+            . '<input type="number" name="service_id" class="form-control input-sm" style="width:120px" placeholder="Service ID" value="' . $e($hint) . '" required> '
+            . '<button class="btn btn-sm btn-primary">Link</button></form></td></tr>';
+    }
+    echo '</tbody></table></div>';
+}
+
+function seekahostcdn_adminHelp($cdn, $e, $money, $link = '', $token = '')
 {
     $settings = $cdn::settings();
     $servers = Capsule::table('tblservers')->where('type', 'seekahostcdn')->count();
@@ -328,10 +462,21 @@ function seekahostcdn_adminHelp($cdn, $e, $money)
         . $check((float) $settings['price_per_gb'] > 0, 'Price per GB is ' . $money($cdn::pricePerGb()) . ' (Configure this addon to change it).')
         . $check($cdn::isOn($settings['enable_billing']), 'Monthly usage invoices are ' . ($cdn::isOn($settings['enable_billing']) ? 'enabled (day ' . (int) $settings['billing_day'] . ')' : 'disabled') . '.')
         . '</ul>'
+        . '<h4>Ways to sell the CDN</h4><ul>'
+        . '<li><strong>Standalone product:</strong> create a product with module "SeekaHost CDN (bunny.net)". Choose Nameservers or CNAME mode, storage and limits on its Module Settings tab.</li>'
+        . '<li><strong>Paid addon on hosting:</strong> create a Product Addon, set its Module to "SeekaHost CDN (bunny.net)" and apply it to your hosting products. The CDN panel appears on the hosting service page.</li>'
+        . '<li><strong>Free with hosting:</strong> enter the hosting product IDs under "Include Free CDN with Products" in this addon\'s Configure settings. New services get a CDN automatically (origin = the hosting server IP).</li>'
+        . '<li><strong>Bandwidth packages:</strong> add a configurable option named "Bandwidth" with options like <code>100|100 GB</code>, <code>1000|1 TB</code>, <code>0|Unlimited</code>. Upgrades apply the new limit instantly.</li>'
+        . '</ul>'
+        . ($cdn::includedProductIds() ? '<form method="post" action="' . $e($link . '&tab=help') . '" style="margin:8px 0 16px">'
+            . '<input type="hidden" name="token" value="' . $e($token) . '"><input type="hidden" name="shcdn_admin" value="include_existing">'
+            . '<button class="btn btn-default" onclick="return confirm(\'Create a CDN for existing active services of the included products (25 at a time)?\')">Add included CDN to existing hosting services</button></form>' : '')
         . '<h4>How it works</h4><ul>'
-        . '<li>On activation the module copies the domain\'s current DNS into bunny.net DNS, creates a pull zone using the current website IP as origin, and points the root and www records at the CDN.</li>'
-        . '<li>The client changes nameservers at their registrar. SSL is issued automatically by the daily cron once the nameservers are detected.</li>'
-        . '<li>The daily cron syncs usage and bunny.net cost. On the billing day each service gets an invoice for the previous month\'s bandwidth at your price per GB.</li>'
-        . '<li>Clients only ever see your price. bunny.net costs are visible to admins only.</li>'
+        . '<li><strong>Nameserver mode:</strong> the domain\'s current DNS is copied into bunny.net DNS, a pull zone is created with the current website IP as origin, and @ and www point to the CDN. The client changes nameservers at their registrar.</li>'
+        . '<li><strong>CNAME mode:</strong> only a pull zone is created. The client adds one CNAME at their own DNS provider; SSL is issued once the CNAME is detected.</li>'
+        . '<li><strong>Storage:</strong> a storage zone is created and used as origin. Clients see FTP/API details in the Storage tab.</li>'
+        . '<li><strong>Daily cron:</strong> syncs usage and bunny.net cost, issues SSL, emails clients at the warning level and at 100% of their limit (with an admin To-Do), and on the billing day invoices last month\'s bandwidth (and storage) at your prices.</li>'
+        . '<li><strong>Existing zones:</strong> use the Import Zones tab to link pull zones you created before.</li>'
+        . '<li>Clients only ever see your price. bunny.net costs are visible to admins only. Email texts can be edited under Email Templates (Product): "SeekaHost CDN Bandwidth Warning" and "SeekaHost CDN Bandwidth Limit Reached".</li>'
         . '</ul></div></div>';
 }
