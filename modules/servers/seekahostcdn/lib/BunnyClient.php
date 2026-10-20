@@ -174,6 +174,50 @@ class BunnyClient
         return $this->request('GET', '/pullzone', null, ['page' => 1, 'perPage' => 5]);
     }
 
+    /** One page of pull zones (for importing existing zones). */
+    public function listPullZonePage($page = 1, $perPage = 100)
+    {
+        $res = $this->request('GET', '/pullzone', null, ['page' => (int) $page, 'perPage' => (int) $perPage]);
+        if (isset($res['Items'])) {
+            return $res;
+        }
+        // Older API versions return a plain list
+        return ['Items' => $res, 'HasMoreItems' => false];
+    }
+
+    /** Purge one URL (wildcards allowed at the end, e.g. https://example.com/images/*). */
+    public function purgeUrl($url)
+    {
+        return $this->request('POST', '/purge', null, ['url' => $url, 'async' => 'false']);
+    }
+
+    // -------------------------------------------------------------- Storage zones
+
+    public function createStorageZone($name, $region, array $replicationRegions = [])
+    {
+        return $this->request('POST', '/storagezone', [
+            'Name' => $name,
+            'Region' => $region,
+            'ReplicationRegions' => array_values($replicationRegions),
+            'ZoneTier' => 0,
+        ]);
+    }
+
+    public function getStorageZone($storageZoneId)
+    {
+        return $this->request('GET', '/storagezone/' . (int) $storageZoneId);
+    }
+
+    public function deleteStorageZone($storageZoneId)
+    {
+        return $this->request('DELETE', '/storagezone/' . (int) $storageZoneId);
+    }
+
+    public function resetStoragePassword($storageZoneId)
+    {
+        return $this->request('POST', '/storagezone/resetPassword', null, ['id' => (int) $storageZoneId]);
+    }
+
     // ----------------------------------------------------------------- Statistics
 
     /**

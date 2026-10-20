@@ -13,7 +13,7 @@
         {elseif $shcdnDetected}
             <span class="shcdn-pill shcdn-pill-green"><i class="shcdn-dot"></i>CDN live</span>
         {else}
-            <span class="shcdn-pill shcdn-pill-amber"><i class="shcdn-dot"></i>Waiting for nameservers</span>
+            <span class="shcdn-pill shcdn-pill-amber"><i class="shcdn-dot"></i>{if $shcdnMode == 'cname'}Waiting for CNAME record{else}Waiting for nameservers{/if}</span>
         {/if}
         {if !$shcdnSuspended}
             <div class="shcdn-actions">
@@ -24,11 +24,60 @@
     </div>
 </div>
 
-{if $shcdnSuspended}
+{if $shcdnOverage}
+    <div class="shcdn-note shcdn-note-amber">Your monthly bandwidth limit has been reached, so the CDN is paused until the start of next month. Upgrade your bandwidth to restore it sooner.</div>
+{elseif $shcdnSuspended}
     <div class="shcdn-note shcdn-note-red">This service is not active, so CDN and DNS changes are disabled. Please contact support or pay any outstanding invoice.</div>
 {/if}
 
+<div class="shcdn-tabs" role="tablist">
+    <button type="button" class="shcdn-tab is-active" data-tab="overview">Overview</button>
+    {if $shcdnMode == 'dns'}<button type="button" class="shcdn-tab" data-tab="dns">DNS records</button>{/if}
+    <button type="button" class="shcdn-tab" data-tab="settings">CDN settings</button>
+    <button type="button" class="shcdn-tab" data-tab="cache">Cache</button>
+    {if $shcdnHasStorage}<button type="button" class="shcdn-tab" data-tab="storage">Storage</button>{/if}
+</div>
+
+<div class="shcdn-pane" data-pane="overview">
+
 {* ------------------------------------------------------------- Nameservers *}
+{if $shcdnMode == 'cname'}
+<div class="shcdn-card">
+    <div class="shcdn-card-head">
+        <h3>Connect your domain</h3>
+        {if $shcdnDetected}<span class="shcdn-pill shcdn-pill-green">Connected</span>{/if}
+    </div>
+    {if !$shcdnDetected}
+        <p class="shcdn-muted">Keep your current DNS provider. Add the record{if count($shcdnCname) > 1}s{/if} below in its DNS settings. The CDN and free SSL activate automatically once the record is detected (usually within minutes, up to a few hours).</p>
+    {else}
+        <p class="shcdn-muted">Your domain points to the CDN. Keep these records at your DNS provider.</p>
+    {/if}
+    <div class="shcdn-table-wrap">
+        <table class="shcdn-table">
+            <thead><tr><th>Type</th><th>Name / Host</th><th>Points to</th><th style="width:110px">Status</th></tr></thead>
+            <tbody>
+            {foreach from=$shcdnCname item=c}
+                <tr>
+                    <td><span class="shcdn-type shcdn-type-2">{if $c.apex}ALIAS{else}CNAME{/if}</span></td>
+                    <td><strong>{$c.host|escape:'html'}</strong></td>
+                    <td><span class="shcdn-val">{$c.target|escape:'html'}</span> <button type="button" class="shcdn-btn shcdn-btn-sm" data-copy="{$c.target|escape:'html'}">Copy</button></td>
+                    <td>{if $c.ok}<span class="shcdn-pill shcdn-pill-green">Detected</span>{else}<span class="shcdn-pill shcdn-pill-grey">Not yet</span>{/if}</td>
+                </tr>
+            {/foreach}
+            </tbody>
+        </table>
+    </div>
+    {foreach from=$shcdnCname item=c}{if $c.apex}
+        <p class="shcdn-muted shcdn-small">{$c.host|escape:'html'} is a root domain. Most DNS providers do not allow a CNAME there; use an ALIAS, ANAME or "CNAME flattening" record instead (e.g. Cloudflare, DNSimple, Route 53).</p>
+    {/if}{/foreach}
+    <div class="shcdn-ssl">
+        <span class="shcdn-ssl-title">SSL certificates</span>
+        {foreach from=$shcdnHostnames item=h}
+            <span class="shcdn-pill {if $h.ssl}shcdn-pill-green{else}shcdn-pill-grey{/if}">{$h.host|escape:'html'} &middot; {if $h.ssl}Secure{else}Pending{/if}</span>
+        {/foreach}
+    </div>
+</div>
+{else}
 <div class="shcdn-card">
     <div class="shcdn-card-head">
         <h3>Nameservers</h3>
@@ -59,6 +108,7 @@
         {/foreach}
     </div>
 </div>
+{/if}
 
 {* ------------------------------------------------------------------- Usage *}
 <div class="shcdn-card">
@@ -86,12 +136,15 @@
         <div class="shcdn-chart-axis"><span id="shcdn-axis-from"></span><span id="shcdn-axis-to"></span></div>
     </div>
     <p class="shcdn-muted shcdn-small">
-        {$shcdnPricePerGb|escape:'html'} per GB &middot; Limit {$shcdnLimit|escape:'html'} per month &middot;
-        Bandwidth is invoiced at the start of each month for the previous month.
+        {if $shcdnBillable}{$shcdnPricePerGb|escape:'html'} per GB &middot; {/if}Limit {$shcdnLimit|escape:'html'} per month{if $shcdnBillable} &middot;
+        Bandwidth is invoiced at the start of each month for the previous month.{else} &middot; Included with your hosting.{/if}
     </p>
+</div>
 </div>
 
 {* ------------------------------------------------------------- DNS records *}
+{if $shcdnMode == 'dns'}
+<div class="shcdn-pane" data-pane="dns" hidden>
 <div class="shcdn-card">
     <div class="shcdn-card-head">
         <h3>DNS records</h3>
@@ -159,6 +212,93 @@
         </table>
     </div>
 </div>
+</div>
+{/if}
+
+{* ------------------------------------------------------------ CDN settings *}
+<div class="shcdn-pane" data-pane="settings" hidden>
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>CDN settings</h3></div>
+    <form id="shcdn-settings" class="shcdn-settings" autocomplete="off">
+        <div class="shcdn-loading" id="shcdn-settings-loading">Loading settings...</div>
+        <div id="shcdn-settings-body" style="display:none">
+            <div class="shcdn-set" id="shcdn-set-origin">
+                <div class="shcdn-set-text"><strong>Origin server</strong><span>Where the CDN fetches your content from, e.g. http://203.0.113.10 or https://origin.example.com.</span></div>
+                <input type="text" name="origin" class="form-control" maxlength="255">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Force HTTPS</strong><span>Redirect all HTTP visitors to HTTPS (only for hostnames that already have SSL).</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="forceSsl" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>CDN cache time</strong><span>How long files are kept on the CDN. "Respect origin headers" uses your server's Cache-Control.</span></div>
+                <select name="cacheTime" class="form-control"></select>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Browser cache time</strong><span>Cache-Control sent to visitors' browsers.</span></div>
+                <select name="browserCacheTime" class="form-control"></select>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Ignore query strings</strong><span>Serve the same cached file for ?v=1 and ?v=2. Turn off if your site uses query strings for content.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="ignoreQueryStrings" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Block countries</strong><span>2-letter country codes separated by commas, e.g. CN, RU. Leave empty to allow all.</span></div>
+                <input type="text" name="blockedCountries" class="form-control" placeholder="e.g. CN, RU">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Hotlink protection</strong><span>Only allow these websites to embed your files (one domain per line, *.example.com allowed). Empty = allow all.</span></div>
+                <textarea name="allowedReferrers" class="form-control" rows="3" placeholder="example.com&#10;*.example.com"></textarea>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Block requests without a referrer</strong><span>Stricter hotlink protection. May block direct downloads and some apps.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="blockNoneReferrer" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Block IP addresses</strong><span>One IP address per line.</span></div>
+                <textarea name="blockedIps" class="form-control" rows="3" placeholder="198.51.100.7"></textarea>
+            </div>
+            {if !$shcdnSuspended}
+            <div class="shcdn-actions" style="margin-top:16px">
+                <button type="submit" class="shcdn-btn shcdn-btn-primary" id="shcdn-settings-save">Save settings</button>
+            </div>
+            {/if}
+        </div>
+    </form>
+</div>
+</div>
+
+{* ------------------------------------------------------------------- Cache *}
+<div class="shcdn-pane" data-pane="cache" hidden>
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>Purge specific files</h3></div>
+    <p class="shcdn-muted">Remove files from the CDN cache so the next visitor gets the latest version from your server. One full URL per line (up to 30). A * at the end purges a whole folder.</p>
+    <textarea id="shcdn-purge-urls" class="form-control shcdn-mono" rows="5" placeholder="https://{$shcdnDomain|escape:'html'}/css/style.css&#10;https://{$shcdnDomain|escape:'html'}/images/*"></textarea>
+    {if !$shcdnSuspended}
+    <div class="shcdn-actions" style="margin-top:12px">
+        <button type="button" class="shcdn-btn shcdn-btn-primary" id="shcdn-purge-urls-btn">Purge URLs</button>
+        <button type="button" class="shcdn-btn" id="shcdn-purge-all">Purge entire cache</button>
+    </div>
+    {/if}
+</div>
+</div>
+
+{* ----------------------------------------------------------------- Storage *}
+{if $shcdnHasStorage}
+<div class="shcdn-pane" data-pane="storage" hidden>
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>Storage</h3></div>
+    <p class="shcdn-muted">Upload files with any FTP client or the bunny.net Storage API. Files are served through your CDN hostnames.</p>
+    <div class="shcdn-loading" id="shcdn-storage-loading">Loading storage details...</div>
+    <div class="shcdn-kv" id="shcdn-storage" style="display:none"></div>
+    {if !$shcdnSuspended}
+    <div class="shcdn-actions" style="margin-top:12px">
+        <button type="button" class="shcdn-btn" id="shcdn-storage-reset">Generate new password</button>
+    </div>
+    {/if}
+</div>
+</div>
+{/if}
 
 <div id="shcdn-toast" class="shcdn-toast" role="status" aria-live="polite"></div>
 </div>
@@ -258,7 +398,37 @@
 #shcdn .shcdn-toast.show { opacity:1; transform:none; }
 #shcdn .shcdn-toast.ok { background:#065f46; } #shcdn .shcdn-toast.err { background:#991b1b; }
 
+#shcdn .shcdn-tabs { display:flex; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--c-border); margin-bottom:16px; }
+#shcdn .shcdn-tab { background:none; border:0; border-bottom:2px solid transparent; padding:10px 14px; font-size:14px; font-weight:500; color:var(--c-muted); cursor:pointer; margin-bottom:-1px; }
+#shcdn .shcdn-tab:hover { color:var(--c-text); }
+#shcdn .shcdn-tab.is-active { color:var(--c-primary); border-bottom-color:var(--c-primary); }
+#shcdn .shcdn-pane[hidden] { display:none; }
+#shcdn .shcdn-loading { color:var(--c-muted); padding:12px 0; }
+#shcdn .shcdn-set { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:14px 0; border-bottom:1px solid #f3f4f6; }
+#shcdn .shcdn-set:last-of-type { border-bottom:0; }
+#shcdn .shcdn-set-text { flex:1 1 55%; }
+#shcdn .shcdn-set-text strong { display:block; font-weight:600; }
+#shcdn .shcdn-set-text span { display:block; color:var(--c-muted); font-size:12.5px; }
+#shcdn .shcdn-set > .form-control { flex:0 1 320px; }
+#shcdn textarea.form-control { font-family:SFMono-Regular,Menlo,Consolas,monospace; font-size:13px; }
+#shcdn .shcdn-switch { position:relative; display:inline-block; width:44px; height:24px; margin:0; flex:0 0 44px; }
+#shcdn .shcdn-switch input { opacity:0; width:0; height:0; }
+#shcdn .shcdn-switch span { position:absolute; inset:0; background:#d1d5db; border-radius:999px; transition:background .15s; cursor:pointer; }
+#shcdn .shcdn-switch span::before { content:""; position:absolute; width:18px; height:18px; left:3px; top:3px; background:#fff; border-radius:50%; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.2); }
+#shcdn .shcdn-switch input:checked + span { background:var(--c-primary); }
+#shcdn .shcdn-switch input:checked + span::before { transform:translateX(20px); }
+#shcdn .shcdn-switch input:disabled + span { opacity:.5; cursor:default; }
+#shcdn .shcdn-kv { border:1px solid var(--c-border); border-radius:10px; overflow:hidden; }
+#shcdn .shcdn-kv-row { display:flex; gap:12px; padding:10px 14px; border-bottom:1px solid #f3f4f6; align-items:center; }
+#shcdn .shcdn-kv-row:last-child { border-bottom:0; }
+#shcdn .shcdn-kv-key { flex:0 0 160px; color:var(--c-muted); font-size:13px; }
+#shcdn .shcdn-kv-val { flex:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap; word-break:break-all; }
+
 @media (max-width: 767px) {
+    #shcdn .shcdn-set { flex-direction:column; align-items:stretch; gap:8px; }
+    #shcdn .shcdn-set > .form-control { flex:1 1 auto; }
+    #shcdn .shcdn-kv-row { flex-direction:column; align-items:flex-start; gap:4px; }
+    #shcdn .shcdn-kv-key { flex:none; }
     #shcdn .shcdn-card { padding:16px; }
     #shcdn .shcdn-hero-side { align-items:flex-start; }
     #shcdn .shcdn-ns { grid-template-columns:1fr; }
@@ -441,9 +611,9 @@
         });
     }
 
-    $('shcdn-filter').addEventListener('input', function () { renderRecords(); });
+    if ($('shcdn-filter')) $('shcdn-filter').addEventListener('input', function () { renderRecords(); });
 
-    $('shcdn-records').addEventListener('click', function (e) {
+    if ($('shcdn-records')) $('shcdn-records').addEventListener('click', function (e) {
         var edit = e.target.closest('[data-edit]');
         var del = e.target.closest('[data-del]');
         if (edit) editRecord(parseInt(edit.getAttribute('data-edit'), 10));
@@ -472,6 +642,7 @@
         });
     }
     simpleAction('shcdn-purge', 'purge', 'Purge the entire CDN cache? Visitors will get fresh content from your server.');
+    simpleAction('shcdn-purge-all', 'purge', 'Purge the entire CDN cache? Visitors will get fresh content from your server.');
     simpleAction('shcdn-import', 'import', 'Look up your domain\'s public DNS and add any missing records?');
     simpleAction('shcdn-ssl', 'ssl');
 
@@ -481,6 +652,123 @@
             if (navigator.clipboard) navigator.clipboard.writeText(text);
             b.textContent = 'Copied';
             setTimeout(function () { b.textContent = 'Copy'; }, 1500);
+        });
+    });
+
+    // ---------------------------------------------------------------- tabs
+    var loaded = {};
+    function showTab(name) {
+        root.querySelectorAll('.shcdn-tab').forEach(function (t) { t.classList.toggle('is-active', t.getAttribute('data-tab') === name); });
+        root.querySelectorAll('.shcdn-pane').forEach(function (p) { p.hidden = p.getAttribute('data-pane') !== name; });
+        if (name === 'settings' && !loaded.settings) { loaded.settings = true; loadSettings(); }
+        if (name === 'storage' && !loaded.storage) { loaded.storage = true; loadStorage(); }
+        try { sessionStorage.setItem('shcdn-tab-' + cfg.serviceId, name); } catch (e) {}
+    }
+    root.querySelectorAll('.shcdn-tab').forEach(function (t) {
+        t.addEventListener('click', function () { showTab(t.getAttribute('data-tab')); });
+    });
+
+    // ------------------------------------------------------------ settings
+    var setForm = $('shcdn-settings');
+    ['cacheTime', 'browserCacheTime'].forEach(function (n) {
+        setForm[n].innerHTML = Object.keys(cfg.cacheChoices).sort(function (a, b) { return a - b; }).map(function (k) {
+            return '<option value="' + k + '">' + esc(cfg.cacheChoices[k]) + '</option>';
+        }).join('');
+    });
+    function fillSettings(st) {
+        $('shcdn-set-origin').style.display = st.storageOrigin ? 'none' : '';
+        setForm.origin.value = st.origin;
+        setForm.forceSsl.checked = !!st.forceSsl;
+        setForm.cacheTime.value = String(st.cacheTime);
+        setForm.browserCacheTime.value = String(st.browserCacheTime);
+        setForm.ignoreQueryStrings.checked = !!st.ignoreQueryStrings;
+        setForm.blockedCountries.value = st.blockedCountries;
+        setForm.allowedReferrers.value = st.allowedReferrers;
+        setForm.blockNoneReferrer.checked = !!st.blockNoneReferrer;
+        setForm.blockedIps.value = st.blockedIps;
+        $('shcdn-settings-loading').style.display = 'none';
+        $('shcdn-settings-body').style.display = '';
+        if (!cfg.active) setForm.querySelectorAll('input,select,textarea').forEach(function (el) { el.disabled = true; });
+    }
+    function loadSettings() {
+        call('settings').then(function (res) {
+            if (res.success) fillSettings(res.settings);
+            else $('shcdn-settings-loading').textContent = res.error || 'Settings could not be loaded.';
+        });
+    }
+    setForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var data = {};
+        new FormData(setForm).forEach(function (v, k) { data[k] = v; });
+        if (setForm.origin.closest('.shcdn-set').style.display === 'none') delete data.origin;
+        var btn = $('shcdn-settings-save');
+        busy(btn, true, 'Saving...');
+        call('settings_save', data).then(function (res) {
+            busy(btn, false);
+            if (res.success) { fillSettings(res.settings); notify('success', res.message); }
+            else notify('error', res.error || 'Settings could not be saved.');
+        });
+    });
+
+    // ------------------------------------------------------------- purging
+    if ($('shcdn-purge-urls-btn')) $('shcdn-purge-urls-btn').addEventListener('click', function () {
+        var btn = this;
+        busy(btn, true, 'Purging...');
+        call('purge_urls', { urls: $('shcdn-purge-urls').value }).then(function (res) {
+            busy(btn, false);
+            notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'Purge failed.'));
+            if (res.success) $('shcdn-purge-urls').value = '';
+        });
+    });
+
+    // ------------------------------------------------------------- storage
+    function renderStorage(st) {
+        // [label, value, secret, copyable]
+        var rows = [
+            ['FTP host', st.ftpHost, false, true], ['FTP port', st.ftpPort], ['Username', st.username, false, true],
+            ['Password', st.password, true, true], ['Read-only password', st.readOnlyPassword, true, true],
+            ['API endpoint', st.apiEndpoint, false, true], ['Region', st.region], ['Used', st.used + ' (' + st.files + ' files)']
+        ];
+        $('shcdn-storage').innerHTML = rows.map(function (r) {
+            var val = r[2]
+                ? '<span class="shcdn-secret" data-secret="' + esc(r[1]) + '">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span> <button type="button" class="shcdn-btn shcdn-btn-sm" data-reveal>Show</button>'
+                : '<span class="shcdn-mono">' + esc(r[1]) + '</span>';
+            return '<div class="shcdn-kv-row"><span class="shcdn-kv-key">' + esc(r[0]) + '</span><span class="shcdn-kv-val">' + val +
+                (r[3] ? ' <button type="button" class="shcdn-btn shcdn-btn-sm" data-copy-value="' + esc(r[1]) + '">Copy</button>' : '') + '</span></div>';
+        }).join('');
+        $('shcdn-storage-loading').style.display = 'none';
+        $('shcdn-storage').style.display = '';
+    }
+    function loadStorage() {
+        call('storage').then(function (res) {
+            if (res.success) renderStorage(res.storage);
+            else $('shcdn-storage-loading').textContent = res.error || 'Storage details could not be loaded.';
+        });
+    }
+    if ($('shcdn-storage')) $('shcdn-storage').addEventListener('click', function (e) {
+        var rev = e.target.closest('[data-reveal]');
+        var cp = e.target.closest('[data-copy-value]');
+        if (rev) {
+            var sec = rev.previousElementSibling;
+            var shown = rev.textContent === 'Hide';
+            sec.textContent = shown ? '••••••••••' : sec.getAttribute('data-secret');
+            sec.classList.toggle('shcdn-mono', !shown);
+            rev.textContent = shown ? 'Show' : 'Hide';
+        }
+        if (cp) {
+            if (navigator.clipboard) navigator.clipboard.writeText(cp.getAttribute('data-copy-value'));
+            cp.textContent = 'Copied';
+            setTimeout(function () { cp.textContent = 'Copy'; }, 1500);
+        }
+    });
+    if ($('shcdn-storage-reset')) $('shcdn-storage-reset').addEventListener('click', function () {
+        if (!confirm('Generate a new storage password? FTP clients and apps using the old password will stop working.')) return;
+        var btn = this;
+        busy(btn, true);
+        call('storage_reset').then(function (res) {
+            busy(btn, false);
+            if (res.success) { renderStorage(res.storage); notify('success', res.message); }
+            else notify('error', res.error || 'Could not reset the password.');
         });
     });
 
@@ -522,8 +810,12 @@
     }
     $('shcdn-range').addEventListener('change', loadStats);
 
-    renderRecords(cfg.records);
+    if ($('shcdn-records')) renderRecords(cfg.records);
     loadStats();
+    try {
+        var last = sessionStorage.getItem('shcdn-tab-' + cfg.serviceId);
+        if (last && root.querySelector('.shcdn-tab[data-tab="' + last + '"]')) showTab(last);
+    } catch (e) {}
 })();
 </script>
 {/literal}
