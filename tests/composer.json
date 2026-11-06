@@ -1,0 +1,8 @@
+{
+    "name": "seekahost/cdn-tests",
+    "description": "Local test harness for the SeekaHost CDN WHMCS module (not shipped)",
+    "require": {
+        "illuminate/database": "^10.0",
+        "smarty/smarty": "^4.0"
+    }
+}
