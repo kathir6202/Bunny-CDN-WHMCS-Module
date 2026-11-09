@@ -26,7 +26,7 @@ function seekahostcdn_config()
     return [
         'name' => 'SeekaHost CDN',
         'description' => 'bunny.net CDN reselling: per-GB pricing, monthly usage invoices and cost/margin reports.',
-        'version' => '2.1.0',
+        'version' => '2.2.0',
         'author' => 'SeekaHost',
         'language' => 'english',
         'fields' => [
@@ -61,6 +61,12 @@ function seekahostcdn_config()
                 'Type' => 'text',
                 'Size' => '5',
                 'Default' => '7',
+            ],
+            'unpaid_suspend' => [
+                'FriendlyName' => 'Suspend on Overdue Usage Invoice',
+                'Type' => 'yesno',
+                'Default' => 'on',
+                'Description' => 'Suspend the CDN as soon as a CDN usage invoice passes its due date unpaid; unsuspend automatically when it is paid.',
             ],
             'tax_usage' => [
                 'FriendlyName' => 'Apply Tax',
@@ -277,7 +283,8 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
     foreach ($rows as $r) {
         $snap = $snapshots[$r->service_id] ?? null;
         $bytes = $snap ? (int) $snap->bandwidth_bytes : 0;
-        $cost = $snap ? (float) $snap->cost : 0.0;
+        $costUsd = $snap ? (float) $snap->cost : 0.0;
+        $cost = (float) $cdn::bunnyCostInDefault($costUsd);
         $price = $cdn::isBillable($r) ? $cdn::priceForBytes($bytes) : 0;
         $margin = $price - $cost;
         $totBytes += $bytes;
@@ -296,7 +303,7 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
             . (($r->source ?? 'product') !== 'product' ? ' <span class="label label-primary">' . (($r->source === 'addon') ? 'Addon' : 'Included') . '</span>' : '')
             . (!empty($r->storage_zone_id) ? ' <span class="label label-default">Storage</span>' : '') . '</td>'
             . '<td class="text-right">' . $e($cdn::formatBytes($bytes)) . '</td>'
-            . '<td class="text-right">' . $e($money($cost)) . '</td>'
+            . '<td class="text-right">' . $e($cdn::formatBunnyCost($costUsd)) . '</td>'
             . '<td class="text-right">' . $e($money($price)) . '</td>'
             . '<td class="text-right" style="color:' . ($margin >= 0 ? '#3c763d' : '#a94442') . '">' . $e($money($margin)) . '</td>'
             . '<td class="text-right">' . ($price > 0 ? round($margin / $price * 100) . '%' : '-') . '</td>'
@@ -305,11 +312,12 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
     }
 
     $margin = $totPrice - $totCost;
+    $noUsdRate = SeekahostCDN\Module::bunnyCostInDefault(1) === null;
     echo '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">';
     foreach ([
         ['CDN services', count($rows)],
         ['Bandwidth this month', $cdn::formatBytes($totBytes)],
-        ['bunny.net cost (MTD)', $money($totCost)],
+        ['bunny.net cost (MTD)' . ($noUsdRate ? ' - add a USD currency' : ''), $money($totCost)],
         ['Our price (MTD)', $money($totPrice)],
         ['Margin (MTD)' . ($totPrice > 0 ? ' · ' . round($margin / $totPrice * 100) . '%' : ''), $money($margin)],
     ] as $tile) {
@@ -322,7 +330,7 @@ function seekahostcdn_adminDashboard($link, $token, $cdn, $e, $money)
     echo '<form method="post" action="' . $e($link) . '" style="margin-bottom:12px">'
         . '<input type="hidden" name="token" value="' . $e($token) . '"><input type="hidden" name="shcdn_admin" value="sync">'
         . '<button class="btn btn-default"><i class="fa fa-refresh"></i> Sync usage from bunny.net now</button>'
-        . ' <small class="text-muted">Usage syncs automatically with the daily cron. Price per GB: ' . $e($money($cdn::pricePerGb())) . '. bunny.net costs are in USD.</small>'
+        . ' <small class="text-muted">Usage syncs automatically with the daily cron. Price per GB: ' . $e($money($cdn::pricePerGb())) . '. bunny.net costs (USD) are converted with your WHMCS USD exchange rate.</small>'
         . '</form>';
 
     echo '<div class="table-responsive"><table class="table table-striped table-condensed"><thead><tr>'
@@ -361,7 +369,7 @@ function seekahostcdn_adminBilling($link, $token, $e, $money)
         $sumGb = 0;
         $rowsHtml = '';
         foreach ($list as $b) {
-            $sumCost += (float) $b->bunny_cost;
+            $sumCost += (float) SeekahostCDN\Module::bunnyCostInDefault($b->bunny_cost);
             $sumPrice += $b->status === 'invoiced' ? (float) $b->cost : 0;
             $sumGb += (float) $b->bandwidth_gb;
             $uid = (int) ($b->userid ?: $b->huserid);
@@ -376,7 +384,7 @@ function seekahostcdn_adminBilling($link, $token, $e, $money)
                 . '<td><a href="clientssummary.php?userid=' . $uid . '">' . $e(trim($b->firstname . ' ' . $b->lastname) ?: 'Client #' . $uid) . '</a></td>'
                 . '<td>' . $e($b->domain ?: 'service #' . $b->service_id) . '</td>'
                 . '<td class="text-right">' . $e(number_format((float) $b->bandwidth_gb, 2)) . ' GB</td>'
-                . '<td class="text-right">' . $e($money($b->bunny_cost)) . '</td>'
+                . '<td class="text-right">' . $e(SeekahostCDN\Module::formatBunnyCost($b->bunny_cost)) . '</td>'
                 . '<td class="text-right">' . $e($money($b->cost)) . '</td>'
                 . '<td class="text-right">' . ($b->client_amount > 0 ? $e(number_format((float) $b->client_amount, 2) . ' ' . $b->currency_code) : '-') . '</td>'
                 . '<td>' . ($b->invoice_id ? '<a href="invoices.php?action=edit&id=' . (int) $b->invoice_id . '">#' . (int) $b->invoice_id . '</a>' : '-') . '</td>'

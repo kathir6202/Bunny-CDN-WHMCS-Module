@@ -110,6 +110,7 @@ namespace {
         $s->create('tbladdonmodules', function ($t) { $t->string('module'); $t->string('setting'); $t->text('value')->nullable(); });
         $s->create('tblproducts', function ($t) { $t->increments('id'); $t->string('name'); $t->string('servertype'); });
         $s->create('tblhostingaddons', function ($t) { $t->increments('id'); $t->integer('hostingid'); $t->string('status'); });
+        $s->create('tblinvoices', function ($t) { $t->increments('id'); $t->integer('userid'); $t->string('status'); $t->date('duedate'); $t->decimal('total', 10, 2)->default(0); });
         $s->create('tbltodolist', function ($t) { $t->increments('id'); $t->date('date'); $t->string('title'); $t->text('description'); $t->integer('admin'); $t->string('status'); $t->date('duedate'); });
         $s->create('tblemailtemplates', function ($t) { $t->increments('id'); $t->string('type'); $t->string('name'); $t->string('subject'); $t->text('message'); $t->integer('custom')->default(0); $t->string('language')->default(''); });
         $s->create('tblhosting', function ($t) {
@@ -182,8 +183,13 @@ namespace {
             return ['result' => 'error', 'message' => 'Simulated invoice failure'];
         }
         if ($cmd === 'CreateInvoice') {
-            $n = (int) @file_get_contents(SHT_TMP . '/invoice-seq') ?: 500;
-            file_put_contents(SHT_TMP . '/invoice-seq', ++$n);
+            $total = 0;
+            foreach ($data as $k => $v) {
+                if (strpos($k, 'itemamount') === 0) {
+                    $total += $v;
+                }
+            }
+            $n = DB::table('tblinvoices')->insertGetId(['userid' => $data['userid'], 'status' => $data['status'] ?? 'Unpaid', 'duedate' => $data['duedate'], 'total' => $total]);
             return ['result' => 'success', 'invoiceid' => $n];
         }
         return ['result' => 'success'];

@@ -268,7 +268,8 @@ function seekahostcdn_adminFields($row)
         $billable = CDN::isBillable($row);
         $ourPrice = $billable ? CDN::priceForBytes($bytes) : 0;
         $cur = CDN::defaultCurrency();
-        $margin = $ourPrice - $bunnyCost;
+        $bunnyCostDefault = CDN::bunnyCostInDefault($bunnyCost);
+        $margin = $ourPrice - (float) $bunnyCostDefault;
         $limit = (int) $row->limit_bytes;
         $ssl = CDN::decodeList($row->ssl_hostnames);
         $cname = ($row->mode ?? 'dns') === 'cname';
@@ -285,7 +286,8 @@ function seekahostcdn_adminFields($row)
         $fields = [
             'CDN' => $e($sourceLabel) . ' &middot; ' . ($cname ? 'CNAME mode' : 'Nameserver mode')
                 . ' &middot; ' . ($row->nameservers_detected ? '<span class="label label-success">' . ($cname ? 'CNAME detected' : 'NS pointed') . '</span>' : '<span class="label label-warning">' . ($cname ? 'CNAME not detected' : 'NS not pointed') . '</span>')
-                . ($row->suspended ? ' <span class="label label-danger">CDN suspended' . ($row->overage_month ? ' (bandwidth)' : '') . '</span>' : ''),
+                . ($row->suspended ? ' <span class="label label-danger">CDN suspended'
+                    . ($row->unpaid_invoice_id ? ' (overdue invoice #' . (int) $row->unpaid_invoice_id . ')' : ($row->overage_month ? ' (bandwidth)' : '')) . '</span>' : ''),
             'Bunny Zones' => 'Pull zone <code>' . $e($row->pull_zone_id) . '</code>'
                 . ($row->dns_zone_id ? ' &nbsp; DNS zone <code>' . $e($row->dns_zone_id) . '</code>' : '')
                 . ($row->storage_zone_id ? ' &nbsp; Storage zone <code>' . $e($row->storage_zone_name) . '</code> (' . $e($row->storage_region) . ')' : '')
@@ -299,10 +301,9 @@ function seekahostcdn_adminFields($row)
             . '<div style="margin-top:6px"><input type="text" name="shcdn_add_host" class="form-control input-sm" style="display:inline-block;width:260px" placeholder="Add hostname, e.g. cdn.example.com">'
             . ' <small class="text-muted">Tick to remove, then Save Changes.</small></div>';
         $fields['Usage This Month'] = $e(CDN::formatBytes($bytes)) . ' &nbsp; Limit: ' . ($limit > 0 ? $e(CDN::formatBytes($limit)) . ' (' . round($bytes / $limit * 100) . '%)' : 'Unlimited');
-        $fields['Cost vs Price (MTD)'] = 'bunny.net cost: <strong>' . $e(CDN::formatMoney($bunnyCost, $cur)) . '</strong>'
+        $fields['Cost vs Price (MTD)'] = 'bunny.net cost: <strong>' . $e(CDN::formatBunnyCost($bunnyCost)) . '</strong>'
             . ' &nbsp; Our price: <strong>' . ($billable ? $e(CDN::formatMoney($ourPrice, $cur)) : 'not billed (included)') . '</strong>'
-            . ' &nbsp; Margin: <strong style="color:' . ($margin >= 0 ? '#3c763d' : '#a94442') . '">' . $e(CDN::formatMoney($margin, $cur)) . '</strong>'
-            . ' <small class="text-muted">(bunny.net cost is in USD)</small>';
+            . ' &nbsp; Margin: <strong style="color:' . ($margin >= 0 ? '#3c763d' : '#a94442') . '">' . ($bunnyCostDefault === null ? 'n/a' : $e(CDN::formatMoney($margin, $cur))) . '</strong>';
         $fields['CDN Action'] = '<select name="shcdn_admin_action" class="form-control input-sm" style="width:260px;display:inline-block">'
             . '<option value="">- none -</option><option value="issuessl">Issue / retry SSL</option><option value="purgecache">Purge whole cache</option>'
             . '<option value="syncusage">Sync usage now</option>'
@@ -634,6 +635,7 @@ function seekahostcdn_clientVars($row, array $ctx, $serviceId)
         'shcdnHasStorage' => !empty($row->storage_zone_id),
         'shcdnSuspended' => !$ctx['active'],
         'shcdnOverage' => !empty($row->overage_month),
+        'shcdnUnpaidInvoice' => (int) ($row->unpaid_invoice_id ?? 0),
         'shcdnBillable' => $ctx['billable'],
         'shcdnPricePerGb' => CDN::formatMoney(CDN::toClientCurrency(CDN::pricePerGb(), $currency), $currency),
         'shcdnLimit' => $ctx['limit'] > 0 ? CDN::formatBytes($ctx['limit']) : 'Unlimited',

@@ -70,6 +70,8 @@ class Module
             'storage_zone_name' => function ($t) { $t->string('storage_zone_name', 100)->nullable(); },
             'storage_region' => function ($t) { $t->string('storage_region', 10)->nullable(); },
             'overage_month' => function ($t) { $t->string('overage_month', 7)->nullable(); },
+            'unpaid_invoice_id' => function ($t) { $t->integer('unpaid_invoice_id')->nullable(); },
+            'unpaid_ignored' => function ($t) { $t->text('unpaid_ignored')->nullable(); },
         ]);
 
         // Daily month-to-date snapshot of each zone: bandwidth and bunny.net cost
@@ -158,6 +160,7 @@ class Module
             'included_limit_gb' => '0',
             'included_mode' => 'CNAME only',
             'included_bill' => '',
+            'unpaid_suspend' => 'on',
         ];
         try {
             $stored = Capsule::table('tbladdonmodules')->where('module', self::MODULE)
@@ -299,6 +302,32 @@ class Module
             return (string) formatCurrency($amount, $currency['id']);
         }
         return ($currency['prefix'] ?? '') . number_format((float) $amount, 2) . ($currency['suffix'] ?? '');
+    }
+
+    /**
+     * bunny.net bills in USD. Convert a USD amount to the WHMCS default currency
+     * using the USD exchange rate configured in WHMCS. Null when no USD currency exists.
+     */
+    public static function bunnyCostInDefault($usd)
+    {
+        $default = self::defaultCurrency();
+        if (strtoupper((string) ($default['code'] ?? '')) === 'USD') {
+            return round((float) $usd, 4);
+        }
+        $rate = (float) Capsule::table('tblcurrencies')->whereRaw('UPPER(code) = ?', ['USD'])->value('rate');
+        return $rate > 0 ? round((float) $usd / $rate, 4) : null;
+    }
+
+    /** "Rs 6.25 (US$0.08)" style text for admins; never shown to clients. */
+    public static function formatBunnyCost($usd)
+    {
+        $default = self::defaultCurrency();
+        $usdText = 'US$' . number_format((float) $usd, 2);
+        if (strtoupper((string) ($default['code'] ?? '')) === 'USD') {
+            return self::formatMoney($usd, $default);
+        }
+        $converted = self::bunnyCostInDefault($usd);
+        return $converted === null ? $usdText . ' (add a USD currency to convert)' : self::formatMoney($converted, $default) . ' (' . $usdText . ')';
     }
 
     public static function defaultCurrency()
@@ -1080,7 +1109,14 @@ class Module
     {
         $limit = $limitBytes !== null ? (int) $limitBytes : (int) $row->limit_bytes;
         ($bunny ?: self::clientForRow($row))->updatePullZone($row->pull_zone_id, ['MonthlyBandwidthLimit' => $limit]);
-        self::touchZone($row->service_id, ['suspended' => 0, 'limit_bytes' => $limit, 'overage_month' => null]);
+        $update = ['suspended' => 0, 'limit_bytes' => $limit, 'overage_month' => null, 'unpaid_invoice_id' => null];
+        if (!empty($row->unpaid_invoice_id)) {
+            // Unsuspended by an admin while the invoice is still unpaid: respect that decision
+            $ignored = self::decodeList($row->unpaid_ignored ?? '');
+            $ignored[] = (int) $row->unpaid_invoice_id;
+            $update['unpaid_ignored'] = json_encode(array_values(array_unique($ignored)));
+        }
+        self::touchZone($row->service_id, $update);
     }
 
     public static function suspend(array $params)
@@ -1219,11 +1255,22 @@ class Module
     {
         self::ensureSchema();
         self::resetOverages();
+        self::checkUnpaidInvoices();
+        $settings = self::settings();
+        $includedLimit = (float) $settings['included_limit_gb'] > 0 ? (int) round((float) $settings['included_limit_gb'] * self::BYTES_PER_GB) : 0;
         $synced = 0;
         $errors = [];
         foreach (Capsule::table('mod_seekahostcdn_dns_zones')->get() as $row) {
             try {
                 $client = self::clientForRow($row);
+                // A changed "Included CDN Bandwidth" setting also applies to existing included CDNs
+                if (($row->source ?? 'product') === 'included' && (int) $row->limit_bytes !== $includedLimit) {
+                    if (!$row->suspended) {
+                        $client->updatePullZone($row->pull_zone_id, ['MonthlyBandwidthLimit' => $includedLimit]);
+                    }
+                    self::touchZone($row->service_id, ['limit_bytes' => $includedLimit]);
+                    $row->limit_bytes = $includedLimit;
+                }
                 self::syncUsage($row, $client);
                 if (count(self::decodeList($row->ssl_hostnames)) < count(self::decodeList($row->hostnames)) || !$row->nameservers_detected) {
                     self::issueSsl(self::zoneForService($row->service_id), $client);
@@ -1234,6 +1281,96 @@ class Module
             }
         }
         return [$synced, $errors];
+    }
+
+    // ======================================================= Unpaid invoices
+
+    /** Overdue (past due date, still unpaid) CDN usage invoices of a service, oldest first. */
+    public static function overdueInvoices($serviceId)
+    {
+        return Capsule::table('mod_seekahostcdn_billing as b')
+            ->join('tblinvoices as i', 'i.id', '=', 'b.invoice_id')
+            ->where('b.service_id', (int) $serviceId)
+            ->where('i.status', 'Unpaid')
+            ->where('i.duedate', '<', date('Y-m-d'))
+            ->orderBy('i.duedate')
+            ->pluck('i.id')->map(function ($v) { return (int) $v; })->toArray();
+    }
+
+    /**
+     * Suspend the CDN as soon as a usage invoice passes its due date unpaid, and
+     * unsuspend it once no overdue usage invoice is left (paid or cancelled).
+     * Runs on every WHMCS cron run and when an invoice is paid.
+     */
+    public static function checkUnpaidInvoices()
+    {
+        self::ensureSchema();
+        if (!self::isOn(self::settings()['unpaid_suspend'])) {
+            return;
+        }
+        // Lift: services suspended for an invoice that is no longer overdue
+        foreach (Capsule::table('mod_seekahostcdn_dns_zones')->whereNotNull('unpaid_invoice_id')->get() as $row) {
+            if (!self::overdueInvoices($row->service_id)) {
+                self::liftUnpaidSuspension($row);
+            }
+        }
+        // Suspend: services with an overdue usage invoice
+        $serviceIds = Capsule::table('mod_seekahostcdn_billing as b')
+            ->join('tblinvoices as i', 'i.id', '=', 'b.invoice_id')
+            ->where('i.status', 'Unpaid')->where('i.duedate', '<', date('Y-m-d'))
+            ->distinct()->pluck('b.service_id')->toArray();
+        foreach ($serviceIds as $serviceId) {
+            $row = self::zoneForService($serviceId);
+            if (!$row || !empty($row->unpaid_invoice_id)) {
+                continue;
+            }
+            $overdue = array_values(array_diff(self::overdueInvoices($serviceId), array_map('intval', self::decodeList($row->unpaid_ignored ?? ''))));
+            if (!$overdue || !in_array(self::serviceStatus($row), ['Active', 'Suspended'], true)) {
+                continue;
+            }
+            try {
+                self::suspendForUnpaid($row, $overdue[0]);
+            } catch (\Exception $e) {
+                logActivity("SeekaHost CDN: could not suspend service #{$serviceId} for overdue invoice #{$overdue[0]}: " . $e->getMessage());
+            }
+        }
+    }
+
+    private static function suspendForUnpaid($row, $invoiceId)
+    {
+        $reason = "Overdue CDN usage invoice #{$invoiceId}";
+        if (($row->source ?? 'product') === 'product') {
+            if (self::serviceStatus($row) === 'Active') {
+                localAPI('ModuleSuspend', ['serviceid' => $row->service_id, 'suspendreason' => $reason]);
+            }
+            $fresh = self::zoneForService($row->service_id);
+            if ($fresh && !$fresh->suspended) {
+                self::suspendRow($fresh);
+            }
+        } elseif (!$row->suspended) {
+            // Addon / included CDN: stop the CDN only, never the customer's hosting
+            self::suspendRow($row);
+        }
+        self::touchZone($row->service_id, ['unpaid_invoice_id' => (int) $invoiceId]);
+        logActivity("SeekaHost CDN: suspended {$row->domain} (service #{$row->service_id}) - {$reason}");
+    }
+
+    private static function liftUnpaidSuspension($row)
+    {
+        self::touchZone($row->service_id, ['unpaid_invoice_id' => null]);
+        $row = self::zoneForService($row->service_id);
+        $pausedForBandwidth = $row->overage_month === date('Y-m');
+        if (($row->source ?? 'product') === 'product') {
+            $service = Capsule::table('tblhosting')->where('id', $row->service_id)->first();
+            $reason = (string) ($service->suspendreason ?? '');
+            $ours = stripos($reason, 'CDN usage invoice') !== false || stripos($reason, 'bandwidth') !== false;
+            if ($service && $service->domainstatus === 'Suspended' && $ours && !$pausedForBandwidth) {
+                localAPI('ModuleUnsuspend', ['serviceid' => $row->service_id]);
+            }
+        } elseif ($row->suspended && !$pausedForBandwidth && self::serviceStatus($row) === 'Active') {
+            self::unsuspendRow($row);
+        }
+        logActivity("SeekaHost CDN: {$row->domain} (service #{$row->service_id}) usage invoice paid - suspension lifted");
     }
 
     // ============================================================== Overage
@@ -1304,7 +1441,9 @@ class Module
             ->where('overage_month', '<', date('Y-m'))->get();
         foreach ($rows as $row) {
             try {
-                if (($row->source ?? 'product') === 'product') {
+                if (!empty($row->unpaid_invoice_id)) {
+                    // Still has an overdue usage invoice: stays suspended until it is paid
+                } elseif (($row->source ?? 'product') === 'product') {
                     $service = Capsule::table('tblhosting')->where('id', $row->service_id)->first();
                     if ($service && $service->domainstatus === 'Suspended' && stripos((string) $service->suspendreason, 'bandwidth') !== false) {
                         localAPI('ModuleUnsuspend', ['serviceid' => $row->service_id]);
@@ -1313,7 +1452,7 @@ class Module
                     if ($fresh && $fresh->suspended && $service && $service->domainstatus === 'Active') {
                         self::unsuspendRow($fresh);
                     }
-                } elseif (self::serviceStatus($row) === 'Active') {
+                } elseif (self::serviceStatus($row) === 'Active' && empty($row->unpaid_invoice_id)) {
                     self::unsuspendRow($row);
                 }
                 self::touchZone($row->service_id, ['overage_month' => null]);

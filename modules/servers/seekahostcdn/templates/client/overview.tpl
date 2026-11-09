@@ -24,7 +24,9 @@
     </div>
 </div>
 
-{if $shcdnOverage}
+{if $shcdnUnpaidInvoice}
+    <div class="shcdn-note shcdn-note-red">Your CDN is paused because invoice <a href="viewinvoice.php?id={$shcdnUnpaidInvoice}"><strong>#{$shcdnUnpaidInvoice}</strong></a> is overdue. It restarts automatically a few minutes after the invoice is paid.</div>
+{elseif $shcdnOverage}
     <div class="shcdn-note shcdn-note-amber">Your monthly bandwidth limit has been reached, so the CDN is paused until the start of next month. Upgrade your bandwidth to restore it sooner.</div>
 {elseif $shcdnSuspended}
     <div class="shcdn-note shcdn-note-red">This service is not active, so CDN and DNS changes are disabled. Please contact support or pay any outstanding invoice.</div>

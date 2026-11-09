@@ -348,6 +348,58 @@ CDN::runMonthlyBilling($month);
 ok(DB::table('mod_seekahostcdn_billing')->where('service_id', 4)->exists(), 'included CDN billed when "Bill Included CDN Usage" is on');
 DB::table('tbladdonmodules')->where('setting', 'included_bill')->update(['value' => '']);
 
+section('Overdue usage invoices');
+$inv = DB::table('mod_seekahostcdn_billing')->pluck('invoice_id', 'service_id')->toArray();
+DB::table('tblinvoices')->where('id', $inv[2])->update(['duedate' => date('Y-m-d')]);
+CDN::checkUnpaidInvoices();
+ok(DB::table('tblhosting')->find(2)->domainstatus === 'Active', 'invoice due today: not suspended yet');
+DB::table('tblinvoices')->where('id', $inv[2])->update(['duedate' => date('Y-m-d', strtotime('-1 day'))]);
+DB::table('tblinvoices')->where('id', $inv[6])->update(['duedate' => date('Y-m-d', strtotime('-1 day'))]);
+run_hook('AfterCronJob', []);
+$h2 = DB::table('tblhosting')->find(2);
+ok($h2->domainstatus === 'Suspended' && strpos($h2->suspendreason, "#{$inv[2]}") !== false, 'past due date: CDN product suspended on the next cron run', $h2);
+ok((int) row(2)->suspended === 1 && (int) row(2)->unpaid_invoice_id === (int) $inv[2], 'CDN stopped and the overdue invoice recorded');
+ok((int) row(6)->suspended === 1 && DB::table('tblhostingaddons')->find(7)->status === 'Active' && DB::table('tblhosting')->find(6)->domainstatus === 'Active', 'paid addon: only the CDN is suspended, not the hosting or addon');
+$html = render(2);
+ok(strpos($html, "viewinvoice.php?id={$inv[2]}") !== false && strpos($html, 'is overdue') !== false, 'client sees which invoice to pay');
+ok(strpos(seekahostcdn_AdminServicesTabFields(params(2))['CDN'], 'overdue invoice') !== false, 'admin sees the overdue-invoice suspension');
+DB::table('tblinvoices')->where('id', $inv[2])->update(['status' => 'Paid']);
+run_hook('InvoicePaid', ['invoiceid' => $inv[2]]);
+ok(DB::table('tblhosting')->find(2)->domainstatus === 'Active' && (int) row(2)->suspended === 0 && !row(2)->unpaid_invoice_id, 'invoice paid: unsuspended immediately');
+DB::table('tblinvoices')->where('id', $inv[6])->update(['status' => 'Cancelled']);
+run_hook('AfterCronJob', []);
+ok((int) row(6)->suspended === 0, 'invoice cancelled: unsuspended on the next cron run');
+DB::table('tblinvoices')->where('id', $inv[1])->update(['duedate' => date('Y-m-d', strtotime('-2 days'))]);
+CDN::checkUnpaidInvoices();
+ok(DB::table('tblhosting')->find(1)->domainstatus === 'Suspended', 'second service suspended for its overdue invoice');
+localAPI('ModuleUnsuspend', ['serviceid' => 1]);
+CDN::checkUnpaidInvoices();
+ok(DB::table('tblhosting')->find(1)->domainstatus === 'Active', 'admin unsuspends manually while unpaid: not re-suspended for that invoice');
+DB::table('tblinvoices')->where('id', $inv[1])->update(['status' => 'Paid']);
+DB::table('tbladdonmodules')->where('setting', 'unpaid_suspend')->delete();
+DB::table('tbladdonmodules')->insert(['module' => 'seekahostcdn', 'setting' => 'unpaid_suspend', 'value' => '']);
+DB::table('tblinvoices')->where('id', $inv[3])->update(['duedate' => date('Y-m-d', strtotime('-3 days'))]);
+CDN::checkUnpaidInvoices();
+ok(DB::table('tblhosting')->find(3)->domainstatus === 'Active', 'setting off: no suspension');
+DB::table('tbladdonmodules')->where('setting', 'unpaid_suspend')->update(['value' => 'on']);
+DB::table('tblinvoices')->where('id', $inv[3])->update(['status' => 'Paid']);
+// Bandwidth suspension + overdue invoice together: new month must not lift it while unpaid
+DB::table('tblinvoices')->where('id', $inv[2])->update(['status' => 'Unpaid', 'duedate' => date('Y-m-d', strtotime('-1 day'))]);
+localAPI('ModuleSuspend', ['serviceid' => 2, 'suspendreason' => 'CDN bandwidth limit exceeded']);
+DB::table('mod_seekahostcdn_dns_zones')->where('service_id', 2)->update(['overage_month' => '2000-01']);
+CDN::checkUnpaidInvoices();
+CDN::resetOverages();
+ok(DB::table('tblhosting')->find(2)->domainstatus === 'Suspended', 'new month does not lift a suspension while a usage invoice is overdue');
+DB::table('tblinvoices')->where('id', $inv[2])->update(['status' => 'Paid']);
+run_hook('InvoicePaid', ['invoiceid' => $inv[2]]);
+ok(DB::table('tblhosting')->find(2)->domainstatus === 'Active' && (int) row(2)->suspended === 0, '...and paying it then restores the service');
+
+section('Included CDN settings apply to existing CDNs');
+DB::table('tbladdonmodules')->where('setting', 'included_limit_gb')->update(['value' => '75']);
+CDN::syncAllUsage();
+ok((int) row(4)->limit_bytes === 75000000000 && fake()['pz'][row(4)->pull_zone_id]['MonthlyBandwidthLimit'] === 75000000000, 'changed included bandwidth applied to existing included CDN');
+DB::table('tbladdonmodules')->where('setting', 'included_limit_gb')->update(['value' => '50']);
+
 // ======================================================================= Admin
 section('Admin');
 foreach (['dashboard', 'billing', 'import', 'help'] as $tab) {
@@ -404,6 +456,17 @@ ok(seekahostcdn_TerminateAccount(params(6, ['addonId' => 7])) === 'success' && r
 fakeEdit(function ($s) use ($z2) { unset($s['pz'][$z2->pull_zone_id]); return $s; });
 ok(seekahostcdn_TerminateAccount(params(2)) === 'success', 'terminate works when the zone was already deleted at bunny.net');
 ok(seekahostcdn_TerminateAccount(params(8)) === 'success', 'terminate of a never-provisioned service is a no-op');
+
+section('Margins in a non-USD default currency');
+DB::table('tblcurrencies')->update(['default' => 0]);
+DB::table('tblcurrencies')->insert(['code' => 'INR', 'prefix' => 'Rs ', 'suffix' => '', 'rate' => 1, 'default' => 1]);
+DB::table('tblcurrencies')->where('code', 'USD')->update(['rate' => 0.012]);
+ok(abs(CDN::bunnyCostInDefault(0.075) - 6.25) < 0.001, 'US$0.075 converted to Rs 6.25 with the WHMCS USD rate');
+ok(strpos(CDN::formatBunnyCost(0.075), 'Rs 6.25') !== false && strpos(CDN::formatBunnyCost(0.075), 'US$0.08') !== false, 'admin sees both Rs and US$ amounts');
+$page = adminPage('dashboard');
+ok(strpos($page, 'US$') !== false && !phpErrors($page), 'dashboard shows converted bunny.net cost');
+DB::table('tblcurrencies')->where('code', 'USD')->delete();
+ok(CDN::bunnyCostInDefault(1) === null && strpos(CDN::formatBunnyCost(0.075), 'add a USD currency') !== false, 'without a USD currency the admin is told to add one');
 
 // ===================================================================== Summary
 $total = $results['pass'] + count($results['fail']);

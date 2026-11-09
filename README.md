@@ -13,8 +13,8 @@ with your per-GB price; admins see bunny.net cost vs your price and margin.
 | SSL | Free certificates issued automatically once the nameservers or CNAME are detected; Force HTTPS |
 | Client panel | Status, setup steps, usage chart, DNS editor (A, AAAA, CNAME, MX, TXT, SRV, CAA, CDN), CDN settings (origin, cache times, query strings, country blocking, hotlink protection, IP blocking), purge everything or specific URLs |
 | Bandwidth | Monthly limit per product or per **"Bandwidth" configurable option** (packages/upgrades); warning email at X%, at 100% email + admin To-Do + optional WHMCS suspension; automatic unsuspend next month |
-| Billing | Monthly invoice per service: bandwidth GB × your price (+ storage GB × storage price), converted to the client's currency, never billed twice, final invoice on cancellation |
-| Admin | Margin dashboard, billing history with retry, **import existing bunny.net pull zones**, add/remove hostnames and run actions from the service page |
+| Billing | Monthly invoice per service: bandwidth GB × your price (+ storage GB × storage price), converted to the client's currency, never billed twice, final invoice on cancellation. CDN is **suspended as soon as a usage invoice is past its due date** and restored when it is paid |
+| Admin | Margin dashboard (bunny.net USD cost converted to your default currency), billing history with retry, **import existing bunny.net pull zones**, add/remove hostnames and run actions from the service page |
 
 ## Files
 
@@ -60,9 +60,21 @@ Extract the release zip in the WHMCS root folder; both folders land in place.
   for a root domain) to the CDN hostname shown in their panel.
 - **Daily cron:** syncs usage and bunny.net cost, issues SSL, sends bandwidth alerts, lifts last
   month's bandwidth suspensions and, from the billing day, invoices the previous month.
+- **Overdue usage invoices:** checked on every cron run. The day after the due date the CDN is
+  suspended (a CDN product is suspended in WHMCS with reason "Overdue CDN usage invoice #N"; an
+  addon or included CDN stops only the CDN, never the hosting). It is restored as soon as the
+  invoice is paid or cancelled. If an admin unsuspends manually, that invoice is not enforced again.
+  Can be turned off with *Suspend on Overdue Usage Invoice*.
+- **Margins:** bunny.net bills in USD; costs are converted with the USD exchange rate in
+  System Settings > Currencies (add a USD currency if your default is not USD).
+- **Included CDN settings:** a changed *Included CDN Bandwidth* applies to existing included CDNs on
+  the next cron run. A changed setup mode only applies to new ones (switching a live site would break it).
 - **Suspend:** the CDN stops serving; DNS keeps working so email is unaffected.
 - **Terminate:** invoices unbilled usage, then deletes the pull zone, DNS zone and storage zone.
 - Clients never see bunny.net costs. Email texts are editable under Email Templates (Product):
   *SeekaHost CDN Bandwidth Warning* and *SeekaHost CDN Bandwidth Limit Reached*.
+
+Testing: `tests/run.sh` runs the end-to-end test suite against a local fake bunny.net API
+(PHP 8 with pdo_sqlite, composer and node required). It is not part of the release zip.
 
 Debugging: enable *System Logs > Module Log* to see every bunny.net API call (API key masked).

@@ -65,6 +65,35 @@ add_hook('DailyCronJob', 1, function ($vars) {
     }
 });
 
+// ------------------------------------------- Overdue CDN usage invoices
+
+// Every cron run (normally every 5 minutes): suspend as soon as a usage invoice is past due
+add_hook('AfterCronJob', 1, function ($vars) {
+    if (!seekahostcdn_hookLoad()) {
+        return;
+    }
+    try {
+        SeekahostCDNModule::checkUnpaidInvoices();
+    } catch (Exception $e) {
+        logActivity('SeekaHost CDN overdue-invoice check failed: ' . $e->getMessage());
+    }
+});
+
+// Unsuspend right away when a usage invoice is paid
+add_hook('InvoicePaid', 1, function ($vars) {
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    if (!$invoiceId || !seekahostcdn_hookLoad()) {
+        return;
+    }
+    try {
+        if (Capsule::table('mod_seekahostcdn_billing')->where('invoice_id', $invoiceId)->exists()) {
+            SeekahostCDNModule::checkUnpaidInvoices();
+        }
+    } catch (Exception $e) {
+        logActivity('SeekaHost CDN: could not process paid invoice #' . $invoiceId . ': ' . $e->getMessage());
+    }
+});
+
 // ------------------------------------------------- Included-with-hosting CDN
 
 add_hook('AfterModuleCreate', 1, function ($vars) {
@@ -105,7 +134,7 @@ add_hook('AfterModuleUnsuspend', 1, function ($vars) {
     }
     $row = seekahostcdn_hookRow($p['serviceid'] ?? 0);
     // A CDN paused for bandwidth stays paused until the new month
-    if ($row && $row->source === 'included' && $row->suspended && $row->overage_month !== date('Y-m')) {
+    if ($row && $row->source === 'included' && $row->suspended && $row->overage_month !== date('Y-m') && empty($row->unpaid_invoice_id)) {
         try {
             SeekahostCDNModule::unsuspendRow($row);
         } catch (Exception $e) {
