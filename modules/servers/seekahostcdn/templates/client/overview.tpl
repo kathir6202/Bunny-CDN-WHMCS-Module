@@ -224,6 +224,7 @@
     <form id="shcdn-settings" class="shcdn-settings" autocomplete="off">
         <div class="shcdn-loading" id="shcdn-settings-loading">Loading settings...</div>
         <div id="shcdn-settings-body" style="display:none">
+            <h4 class="shcdn-set-group" style="margin-top:0">General &amp; security</h4>
             <div class="shcdn-set" id="shcdn-set-origin">
                 <div class="shcdn-set-text"><strong>Origin server</strong><span>Where the CDN fetches your content from, e.g. http://203.0.113.10 or https://origin.example.com.</span></div>
                 <input type="text" name="origin" class="form-control" maxlength="255">
@@ -260,12 +261,98 @@
                 <div class="shcdn-set-text"><strong>Block IP addresses</strong><span>One IP address per line.</span></div>
                 <textarea name="blockedIps" class="form-control" rows="3" placeholder="198.51.100.7"></textarea>
             </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Connections per IP</strong><span>Maximum simultaneous connections from one visitor IP. 0 = no limit.</span></div>
+                <input type="number" name="connectionLimit" class="form-control" min="0" max="1000">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Requests per second per IP</strong><span>Slows down scrapers and floods. 0 = no limit.</span></div>
+                <input type="number" name="requestLimit" class="form-control" min="0" max="10000">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Download speed limit (kB/s)</strong><span>Per connection. Useful for large downloads. 0 = no limit.</span></div>
+                <input type="number" name="speedLimit" class="form-control" min="0" max="1000000">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>CORS headers</strong><span>Send Access-Control-Allow-Origin so other sites can load these file types (e.g. web fonts).</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="cors" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>CORS file extensions</strong><span>Comma-separated, e.g. woff, woff2, ttf, eot, css, js.</span></div>
+                <input type="text" name="corsExtensions" class="form-control" placeholder="woff, woff2, ttf, eot">
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Token authentication</strong><span>Only serve signed URLs (with token and expiry). Every unsigned URL will be refused &ndash; turn on only if your site signs its URLs.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="tokenAuth" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Bind tokens to visitor IP</strong><span>A signed URL only works from the IP it was created for.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="tokenIp" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Token authentication key</strong><span>Use this secret in your code to sign URLs. Keep it private.</span></div>
+                <div class="shcdn-kv-val" style="flex:0 1 320px"><span class="shcdn-secret shcdn-mono" id="shcdn-token-key" data-secret="">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
+                    <button type="button" class="shcdn-btn shcdn-btn-sm" id="shcdn-token-show">Show</button>
+                    <button type="button" class="shcdn-btn shcdn-btn-sm" id="shcdn-token-copy">Copy</button>
+                    {if !$shcdnSuspended}<button type="button" class="shcdn-btn shcdn-btn-sm" id="shcdn-token-reset">New key</button>{/if}</div>
+            </div>
+
+            <h4 class="shcdn-set-group">Performance</h4>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Origin Shield</strong><span>An extra cache layer in front of your server, so it receives far fewer requests.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="originShield" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Serve stale while updating</strong><span>Visitors get the cached copy instantly while a fresh one is fetched.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="staleUpdating" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Serve stale while your server is down</strong><span>Keep the site online from cache if your origin is unreachable.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="staleOffline" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Vary cache by WebP support</strong><span>Cache separate copies for browsers that accept WebP images.</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="webpVary" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Vary cache by country</strong><span>Cache a separate copy per visitor country (for country-specific content).</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="countryVary" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Vary cache by cookies</strong><span>Cookie names, comma-separated (e.g. currency, lang). Empty = off.</span></div>
+                <input type="text" name="cookieVary" class="form-control" placeholder="currency, lang">
+            </div>
             {if !$shcdnSuspended}
             <div class="shcdn-actions" style="margin-top:16px">
                 <button type="submit" class="shcdn-btn shcdn-btn-primary" id="shcdn-settings-save">Save settings</button>
             </div>
             {/if}
         </div>
+    </form>
+</div>
+
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>Custom SSL certificate</h3></div>
+    <p class="shcdn-muted">Free SSL is issued automatically. Upload your own certificate only if you need a specific one (e.g. EV/OV or a wildcard you already own).</p>
+    <form id="shcdn-cert" autocomplete="off">
+        <div class="shcdn-grid">
+            <label class="shcdn-field shcdn-w-type"><span>Hostname</span>
+                <select name="hostname" class="form-control">
+                    {foreach from=$shcdnHostnames item=h}<option value="{$h.host|escape:'html'}">{$h.host|escape:'html'}</option>{/foreach}
+                </select>
+            </label>
+            <label class="shcdn-field" style="flex:1 1 100%"><span>Certificate (PEM, including any intermediate certificates)</span>
+                <textarea name="certificate" class="form-control" rows="5" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+            </label>
+            <label class="shcdn-field" style="flex:1 1 100%"><span>Private key (PEM, not password-protected)</span>
+                <textarea name="private_key" class="form-control" rows="5" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+            </label>
+        </div>
+        {if !$shcdnSuspended}
+        <div class="shcdn-actions" style="margin-top:12px">
+            <button type="submit" class="shcdn-btn shcdn-btn-primary" id="shcdn-cert-save">Install certificate</button>
+        </div>
+        {/if}
     </form>
 </div>
 </div>
@@ -420,6 +507,7 @@
 #shcdn .shcdn-switch input:checked + span { background:var(--c-primary); }
 #shcdn .shcdn-switch input:checked + span::before { transform:translateX(20px); }
 #shcdn .shcdn-switch input:disabled + span { opacity:.5; cursor:default; }
+#shcdn .shcdn-set-group { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--c-muted); margin:22px 0 4px; font-weight:600; }
 #shcdn .shcdn-kv { border:1px solid var(--c-border); border-radius:10px; overflow:hidden; }
 #shcdn .shcdn-kv-row { display:flex; gap:12px; padding:10px 14px; border-bottom:1px solid #f3f4f6; align-items:center; }
 #shcdn .shcdn-kv-row:last-child { border-bottom:0; }
@@ -688,6 +776,16 @@
         setForm.allowedReferrers.value = st.allowedReferrers;
         setForm.blockNoneReferrer.checked = !!st.blockNoneReferrer;
         setForm.blockedIps.value = st.blockedIps;
+        ['originShield', 'staleUpdating', 'staleOffline', 'webpVary', 'countryVary', 'cors', 'tokenAuth', 'tokenIp'].forEach(function (n) {
+            setForm[n].checked = !!st[n];
+        });
+        ['cookieVary', 'corsExtensions', 'connectionLimit', 'requestLimit', 'speedLimit'].forEach(function (n) {
+            setForm[n].value = st[n];
+        });
+        var tk = $('shcdn-token-key');
+        tk.setAttribute('data-secret', st.tokenKey || '');
+        tk.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+        $('shcdn-token-show').textContent = 'Show';
         $('shcdn-settings-loading').style.display = 'none';
         $('shcdn-settings-body').style.display = '';
         if (!cfg.active) setForm.querySelectorAll('input,select,textarea').forEach(function (el) { el.disabled = true; });
@@ -709,6 +807,43 @@
             busy(btn, false);
             if (res.success) { fillSettings(res.settings); notify('success', res.message); }
             else notify('error', res.error || 'Settings could not be saved.');
+        });
+    });
+
+    $('shcdn-token-show').addEventListener('click', function () {
+        var tk = $('shcdn-token-key');
+        var shown = this.textContent === 'Hide';
+        tk.textContent = shown ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : (tk.getAttribute('data-secret') || '(none)');
+        this.textContent = shown ? 'Show' : 'Hide';
+    });
+    $('shcdn-token-copy').addEventListener('click', function () {
+        var b = this;
+        if (navigator.clipboard) navigator.clipboard.writeText($('shcdn-token-key').getAttribute('data-secret') || '');
+        b.textContent = 'Copied';
+        setTimeout(function () { b.textContent = 'Copy'; }, 1500);
+    });
+    if ($('shcdn-token-reset')) $('shcdn-token-reset').addEventListener('click', function () {
+        if (!confirm('Generate a new token key? URLs signed with the old key stop working immediately.')) return;
+        var btn = this;
+        busy(btn, true, '...');
+        call('token_reset').then(function (res) {
+            busy(btn, false);
+            if (res.success) { fillSettings(res.settings); notify('success', res.message); }
+            else notify('error', res.error || 'Could not generate a new key.');
+        });
+    });
+
+    var certForm = $('shcdn-cert');
+    certForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var data = {};
+        new FormData(certForm).forEach(function (v, k) { data[k] = v; });
+        var btn = $('shcdn-cert-save');
+        busy(btn, true, 'Installing...');
+        call('cert_upload', data).then(function (res) {
+            busy(btn, false);
+            notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'The certificate could not be installed.'));
+            if (res.success) { certForm.certificate.value = ''; certForm.private_key.value = ''; }
         });
     });
 

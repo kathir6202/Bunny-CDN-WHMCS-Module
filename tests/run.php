@@ -276,6 +276,53 @@ ok($res === 'success' && count(CDN::decodeList(row(1)->ssl_hostnames)) >= 2, 'na
 ok((int) row(1)->nameservers_detected === 1 && strpos(render(1), 'CDN live') !== false, 'status changes to "CDN live"');
 ok(CDN::nameserversPointed('iana.org') === false, 'a domain on other nameservers is not reported as pointed');
 
+section('Advanced CDN settings');
+$base = 'shcdn_action=settings_save&origin=203.0.113.9&cacheTime=-1&browserCacheTime=-1';
+$res = ajax(2, $base . '&originShield=1&staleUpdating=1&staleOffline=1&webpVary=1&countryVary=1&cookieVary=' . urlencode('currency, lang')
+    . '&cors=1&corsExtensions=' . urlencode('woff2, .ttf, css') . '&tokenAuth=1&tokenIp=1&connectionLimit=20&requestLimit=50&speedLimit=2048');
+$pz2 = fake()['pz'][$z2->pull_zone_id];
+ok($res['success'] && $pz2['EnableOriginShield'] === true && $pz2['UseStaleWhileUpdating'] === true && $pz2['UseStaleWhileOffline'] === true, 'origin shield and stale cache saved', $res);
+ok($pz2['EnableWebPVary'] === true && $pz2['EnableCountryCodeVary'] === true && $pz2['EnableCookieVary'] === true && $pz2['CookieVaryParameters'] === ['currency', 'lang'], 'vary cache (WebP, country, cookies) saved');
+ok($pz2['EnableAccessControlOriginHeader'] === true && $pz2['AccessControlOriginHeaderExtensions'] === ['woff2', 'ttf', 'css'], 'CORS headers and extensions saved');
+ok($pz2['ZoneSecurityEnabled'] === true && $pz2['ZoneSecurityIncludeHashRemoteIP'] === true, 'token authentication saved');
+ok($pz2['ConnectionLimitPerIPCount'] === 20 && $pz2['RequestLimit'] === 50 && $pz2['LimitRatePerSecond'] === 2048, 'connection, request and speed limits saved');
+$st = ajax(2, 'shcdn_action=settings')['settings'];
+ok($st['originShield'] && $st['cookieVary'] === 'currency, lang' && $st['connectionLimit'] === 20 && strlen($st['tokenKey']) === 32, 'settings read back, including the token key');
+ok(!ajax(2, $base . '&cookieVary=' . urlencode('bad cookie!'))['success'], 'invalid cookie name refused');
+ok(!ajax(2, $base . '&corsExtensions=' . urlencode('verylongextension'))['success'], 'invalid CORS extension refused');
+ok(!ajax(2, $base . '&connectionLimit=-5')['success'] && !ajax(2, $base . '&requestLimit=abc')['success'] && !ajax(2, $base . '&speedLimit=99999999')['success'], 'out-of-range limits refused');
+ok(ajax(2, $base)['success'] && fake()['pz'][$z2->pull_zone_id]['ZoneSecurityEnabled'] === false && fake()['pz'][$z2->pull_zone_id]['ConnectionLimitPerIPCount'] === 0, 'unticked options switch off, empty limits mean no limit');
+$res = ajax(2, 'shcdn_action=token_reset');
+ok($res['success'] && $res['settings']['tokenKey'] !== $st['tokenKey'], 'token key regenerated');
+
+section('Custom SSL certificate');
+$makeCert = function ($cn, $sans) {
+    $cfgFile = SHT_TMP . '/openssl.cnf';
+    file_put_contents($cfgFile, "[req]\ndistinguished_name=dn\n[dn]\n[ext]\nsubjectAltName=" . implode(',', array_map(function ($n) { return 'DNS:' . $n; }, $sans)) . "\n");
+    $key = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+    $csr = openssl_csr_new(['commonName' => $cn], $key, ['config' => $cfgFile, 'digest_alg' => 'sha256']);
+    $crt = openssl_csr_sign($csr, null, $key, 30, ['config' => $cfgFile, 'x509_extensions' => 'ext', 'digest_alg' => 'sha256']);
+    openssl_x509_export($crt, $certPem);
+    openssl_pkey_export($key, $keyPem);
+    return [$certPem, $keyPem];
+};
+list($cert, $key) = $makeCert('www.shop-test.co.uk', ['www.shop-test.co.uk']);
+list($otherCert, $otherKey) = $makeCert('other.example.com', ['other.example.com']);
+list($wildCert, $wildKey) = $makeCert('*.shop-test.co.uk', ['*.shop-test.co.uk']);
+$q = function ($host, $c, $k) { return 'shcdn_action=cert_upload&hostname=' . urlencode($host) . '&certificate=' . urlencode($c) . '&private_key=' . urlencode($k); };
+$res = ajax(2, $q('www.shop-test.co.uk', $cert, $key));
+ok($res['success'] && strpos($res['message'], 'valid until') !== false, 'valid certificate installed', $res);
+$hn = array_values(array_filter(fake()['pz'][$z2->pull_zone_id]['Hostnames'], function ($h) { return $h['Value'] === 'www.shop-test.co.uk'; }));
+ok(!empty($hn[0]['CustomCertificate']), 'certificate sent to bunny.net for the hostname');
+ok(in_array('www.shop-test.co.uk', CDN::decodeList(row(2)->ssl_hostnames), true), 'hostname marked as having SSL');
+ok(strpos(ajax(2, $q('www.shop-test.co.uk', $otherCert, $otherKey))['error'], 'not valid for') !== false, 'certificate for another domain refused');
+ok(strpos(ajax(2, $q('www.shop-test.co.uk', $cert, $otherKey))['error'], 'does not belong') !== false, 'mismatched private key refused');
+ok(strpos(ajax(2, $q('www.shop-test.co.uk', 'garbage', $key))['error'], 'not a valid PEM') !== false, 'garbage certificate refused');
+ok(strpos(ajax(2, $q('www.example.com', $cert, $key))['error'], 'Choose one of your') !== false, "someone else's hostname refused");
+ok(ajax(2, $q('www.shop-test.co.uk', $wildCert, $wildKey))['success'], 'wildcard certificate accepted for a matching subdomain');
+$log = (string) @file_get_contents(SHT_TMP . '/modulecall.log');
+ok(strpos($log, 'PRIVATE KEY') === false && strpos($log, base64_encode($key)) === false && strpos($log, substr(base64_encode($key), 40, 40)) === false, 'private key never written to the module log');
+
 // =================================================================== Lifecycle
 section('Suspend / unsuspend / upgrade');
 seekahostcdn_SuspendAccount(params(2));

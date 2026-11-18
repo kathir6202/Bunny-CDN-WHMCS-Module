@@ -479,7 +479,8 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
     }
 
     // Throttle actions that are expensive for this server or bunny.net
-    $cooldowns = ['import' => 60, 'purge' => 10, 'purge_urls' => 5, 'ssl' => 20, 'storage_reset' => 60, 'settings_save' => 3];
+    $cooldowns = ['import' => 60, 'purge' => 10, 'purge_urls' => 5, 'ssl' => 20, 'storage_reset' => 60, 'settings_save' => 3,
+        'token_reset' => 60, 'cert_upload' => 10];
     if (isset($cooldowns[$action])) {
         $key = 'shcdn_throttle_' . (int) $row->service_id . '_' . $action;
         $wait = (int) ($_SESSION[$key] ?? 0) + $cooldowns[$action] - time();
@@ -564,6 +565,15 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
                 seekahostcdn_json(['success' => true, 'message' => 'CDN settings saved. Changes apply within a few minutes.',
                     'settings' => CDN::cdnSettings(CDN::zoneForService($row->service_id), $bunny)]);
 
+            case 'token_reset':
+                $bunny->resetSecurityKey($row->pull_zone_id);
+                seekahostcdn_json(['success' => true, 'message' => 'A new token authentication key has been generated. Update your signing code.',
+                    'settings' => CDN::cdnSettings($row, $bunny)]);
+
+            case 'cert_upload':
+                $until = CDN::uploadCertificate($row, $bunny, $_POST['hostname'] ?? '', $_POST['certificate'] ?? '', $_POST['private_key'] ?? '');
+                seekahostcdn_json(['success' => true, 'message' => 'Certificate installed. It is valid until ' . $until . '.']);
+
             case 'storage':
                 if (empty($row->storage_zone_id)) {
                     throw new InvalidArgumentException('This CDN has no storage zone.');
@@ -581,7 +591,7 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
     } catch (InvalidArgumentException $e) {
         seekahostcdn_json(['success' => false, 'error' => $e->getMessage()]);
     } catch (Exception $e) {
-        logModuleCall('seekahostcdn', 'ClientArea:' . $action, array_diff_key($_POST, ['token' => 1]), $e->getMessage());
+        logModuleCall('seekahostcdn', 'ClientArea:' . $action, array_diff_key($_POST, ['token' => 1, 'private_key' => 1, 'certificate' => 1]), $e->getMessage());
         seekahostcdn_json(['success' => false, 'error' => 'The request could not be completed: ' . $e->getMessage()]);
     }
 }

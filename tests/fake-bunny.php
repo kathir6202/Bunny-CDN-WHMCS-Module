@@ -158,7 +158,8 @@ if ($m === 'POST' && $p === '/pullzone') {
         'Hostnames' => [['Value' => $b['Name'] . '.b-cdn.net', 'IsSystemHostname' => true, 'HasCertificate' => true, 'ForceSSL' => false]],
         'MonthlyBandwidthUsed' => 7500000000, 'MonthlyCharges' => 0.075, 'MonthlyBandwidthLimit' => 0,
         'CacheControlMaxAgeOverride' => -1, 'CacheControlBrowserMaxAgeOverride' => -1, 'IgnoreQueryStrings' => false,
-        'BlockedCountries' => [], 'AllowedReferrers' => [], 'BlockNoneReferrer' => false, 'BlockedIps' => []];
+        'BlockedCountries' => [], 'AllowedReferrers' => [], 'BlockNoneReferrer' => false, 'BlockedIps' => [],
+        'ZoneSecurityEnabled' => false, 'ZoneSecurityKey' => md5(mt_rand()), 'EnableOriginShield' => false];
     $s['pz'][$z['Id']] = $z;
     out(201, $z);
 }
@@ -203,6 +204,23 @@ if (preg_match('#^/pullzone/(\d+)(/(\w+))?$#', $p, $x)) {
         foreach ($s['pz'][$pid]['Hostnames'] as &$h) {
             if ($h['Value'] === $b['Hostname']) {
                 $h['ForceSSL'] = $b['ForceSSL'];
+            }
+        }
+        unset($h);
+        out(204);
+    }
+    if ($op === 'resetSecurityKey') {
+        $s['pz'][$pid]['ZoneSecurityKey'] = md5(mt_rand());
+        out(204);
+    }
+    if ($op === 'addCertificate') {
+        if (base64_decode($b['Certificate'] ?? '', true) === false || base64_decode($b['CertificateKey'] ?? '', true) === false) {
+            out(400, ['Message' => 'Certificate must be base64']);
+        }
+        foreach ($s['pz'][$pid]['Hostnames'] as &$h) {
+            if ($h['Value'] === $b['Hostname']) {
+                $h['HasCertificate'] = true;
+                $h['CustomCertificate'] = true;
             }
         }
         unset($h);

@@ -1813,7 +1813,96 @@ class Module
             'allowedReferrers' => implode("\n", (array) ($z['AllowedReferrers'] ?? [])),
             'blockNoneReferrer' => !empty($z['BlockNoneReferrer']),
             'blockedIps' => implode("\n", (array) ($z['BlockedIps'] ?? [])),
+            // Performance
+            'originShield' => !empty($z['EnableOriginShield']),
+            'staleUpdating' => !empty($z['UseStaleWhileUpdating']),
+            'staleOffline' => !empty($z['UseStaleWhileOffline']),
+            'webpVary' => !empty($z['EnableWebPVary']),
+            'countryVary' => !empty($z['EnableCountryCodeVary']),
+            'cookieVary' => implode(', ', (array) ($z['CookieVaryParameters'] ?? [])),
+            // Security
+            'cors' => !empty($z['EnableAccessControlOriginHeader']),
+            'corsExtensions' => implode(', ', (array) ($z['AccessControlOriginHeaderExtensions'] ?? [])),
+            'tokenAuth' => !empty($z['ZoneSecurityEnabled']),
+            'tokenIp' => !empty($z['ZoneSecurityIncludeHashRemoteIP']),
+            'tokenKey' => (string) ($z['ZoneSecurityKey'] ?? ''),
+            'connectionLimit' => (int) ($z['ConnectionLimitPerIPCount'] ?? 0),
+            'requestLimit' => (int) ($z['RequestLimit'] ?? 0),
+            'speedLimit' => (int) ($z['LimitRatePerSecond'] ?? 0),
         ];
+    }
+
+    /** Whole number within [min, max]; throws a client-safe error otherwise. */
+    private static function intSetting(array $in, $key, $label, $min, $max)
+    {
+        $raw = trim((string) ($in[$key] ?? '0'));
+        if ($raw === '') {
+            $raw = '0';
+        }
+        if (!preg_match('/^\d+$/', $raw) || (int) $raw < $min || (int) $raw > $max) {
+            throw new \InvalidArgumentException("{$label} must be a whole number from {$min} to {$max} (0 = no limit).");
+        }
+        return (int) $raw;
+    }
+
+    /**
+     * Validate a client's own certificate and install it for one of their hostnames.
+     * Throws InvalidArgumentException with a client-safe message.
+     */
+    public static function uploadCertificate($row, BunnyClient $bunny, $host, $certPem, $keyPem)
+    {
+        $host = strtolower(trim((string) $host));
+        if (!in_array($host, self::decodeList($row->hostnames), true)) {
+            throw new \InvalidArgumentException('Choose one of your CDN hostnames.');
+        }
+        $certPem = trim((string) $certPem);
+        $keyPem = trim((string) $keyPem);
+        if (strlen($certPem) > 65536 || strlen($keyPem) > 16384) {
+            throw new \InvalidArgumentException('The certificate or key is too large.');
+        }
+        if (!function_exists('openssl_x509_read')) {
+            throw new \InvalidArgumentException('Certificate upload needs the PHP OpenSSL extension on the server.');
+        }
+        $cert = @openssl_x509_read($certPem);
+        if (!$cert) {
+            throw new \InvalidArgumentException('The certificate is not a valid PEM certificate (-----BEGIN CERTIFICATE-----).');
+        }
+        $key = @openssl_pkey_get_private($keyPem);
+        if (!$key) {
+            throw new \InvalidArgumentException('The private key is not valid or is password-protected.');
+        }
+        if (!openssl_x509_check_private_key($cert, $key)) {
+            throw new \InvalidArgumentException('The private key does not belong to this certificate.');
+        }
+        $info = openssl_x509_parse($cert);
+        if (($info['validTo_time_t'] ?? 0) < time()) {
+            throw new \InvalidArgumentException('This certificate has expired.');
+        }
+        $names = [];
+        if (!empty($info['subject']['CN'])) {
+            $names[] = strtolower($info['subject']['CN']);
+        }
+        foreach (explode(',', (string) ($info['extensions']['subjectAltName'] ?? '')) as $san) {
+            $san = trim($san);
+            if (stripos($san, 'DNS:') === 0) {
+                $names[] = strtolower(substr($san, 4));
+            }
+        }
+        $covered = false;
+        foreach ($names as $name) {
+            if ($name === $host || (strpos($name, '*.') === 0 && substr($host, strpos($host, '.')) === substr($name, 1))) {
+                $covered = true;
+            }
+        }
+        if (!$covered) {
+            throw new \InvalidArgumentException("The certificate is not valid for {$host}.");
+        }
+        $bunny->addCertificate($row->pull_zone_id, $host, $certPem, $keyPem);
+        $ssl = self::decodeList($row->ssl_hostnames);
+        $ssl[] = $host;
+        self::touchZone($row->service_id, ['ssl_hostnames' => json_encode(array_values(array_unique($ssl)))]);
+        logActivity("SeekaHost CDN: custom certificate installed for {$host} (service #{$row->service_id}, expires " . date('Y-m-d', $info['validTo_time_t']) . ')');
+        return date('j M Y', $info['validTo_time_t']);
     }
 
     private static function lines($text, $max, $label)
@@ -1886,6 +1975,36 @@ class Module
             }
         }
         $update['BlockedIps'] = $ips;
+
+        // Performance
+        $update['EnableOriginShield'] = self::isOn($in['originShield'] ?? '');
+        $update['UseStaleWhileUpdating'] = self::isOn($in['staleUpdating'] ?? '');
+        $update['UseStaleWhileOffline'] = self::isOn($in['staleOffline'] ?? '');
+        $update['EnableWebPVary'] = self::isOn($in['webpVary'] ?? '');
+        $update['EnableCountryCodeVary'] = self::isOn($in['countryVary'] ?? '');
+        $cookies = self::lines($in['cookieVary'] ?? '', 20, 'cookie names');
+        foreach ($cookies as $c) {
+            if (!preg_match('/^[A-Za-z0-9_.-]{1,64}$/', $c)) {
+                throw new \InvalidArgumentException("\"{$c}\" is not a valid cookie name.");
+            }
+        }
+        $update['EnableCookieVary'] = (bool) $cookies;
+        $update['CookieVaryParameters'] = $cookies;
+
+        // Security
+        $update['EnableAccessControlOriginHeader'] = self::isOn($in['cors'] ?? '');
+        $extensions = array_map('strtolower', self::lines(str_replace(' ', ',', $in['corsExtensions'] ?? ''), 50, 'file extensions'));
+        foreach ($extensions as $ext) {
+            if (!preg_match('/^[a-z0-9]{1,10}$/', ltrim($ext, '.'))) {
+                throw new \InvalidArgumentException("\"{$ext}\" is not a file extension (e.g. woff2, css).");
+            }
+        }
+        $update['AccessControlOriginHeaderExtensions'] = array_map(function ($x) { return ltrim($x, '.'); }, $extensions);
+        $update['ZoneSecurityEnabled'] = self::isOn($in['tokenAuth'] ?? '');
+        $update['ZoneSecurityIncludeHashRemoteIP'] = self::isOn($in['tokenIp'] ?? '');
+        $update['ConnectionLimitPerIPCount'] = self::intSetting($in, 'connectionLimit', 'Connections per IP', 0, 1000);
+        $update['RequestLimit'] = self::intSetting($in, 'requestLimit', 'Requests per second per IP', 0, 10000);
+        $update['LimitRatePerSecond'] = self::intSetting($in, 'speedLimit', 'Download speed limit', 0, 1000000);
 
         $bunny->updatePullZone($row->pull_zone_id, $update);
         if (isset($update['OriginUrl'])) {

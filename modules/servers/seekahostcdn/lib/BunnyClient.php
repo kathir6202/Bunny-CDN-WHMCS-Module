@@ -163,6 +163,22 @@ class BunnyClient
         ]);
     }
 
+    /** Generate a new token-authentication key for signed URLs. */
+    public function resetSecurityKey($pullZoneId)
+    {
+        return $this->request('POST', '/pullzone/' . (int) $pullZoneId . '/resetSecurityKey');
+    }
+
+    /** Install a client-supplied certificate (PEM) for a hostname. */
+    public function addCertificate($pullZoneId, $hostname, $certificatePem, $keyPem)
+    {
+        return $this->request('POST', '/pullzone/' . (int) $pullZoneId . '/addCertificate', [
+            'Hostname' => $hostname,
+            'Certificate' => base64_encode($certificatePem),
+            'CertificateKey' => base64_encode($keyPem),
+        ]);
+    }
+
     public function purgeCache($pullZoneId)
     {
         return $this->request('POST', '/pullzone/' . (int) $pullZoneId . '/purgeCache');
@@ -270,7 +286,15 @@ class BunnyClient
         if (function_exists('logModuleCall')) {
             // Never write passwords or keys (e.g. storage zone FTP passwords) to the module log
             $logged = $raw === false ? $curlError : preg_replace('/"(Password|ReadOnlyPassword|AccessKey|ApiKey)"\s*:\s*"[^"]*"/i', '"$1":"***"', $raw);
-            logModuleCall('seekahostcdn', $method . ' ' . $path, ['query' => $query, 'body' => $body],
+            $loggedBody = $body;
+            if (is_array($loggedBody)) {
+                foreach (['Certificate', 'CertificateKey', 'Password'] as $secret) {
+                    if (isset($loggedBody[$secret])) {
+                        $loggedBody[$secret] = '***';
+                    }
+                }
+            }
+            logModuleCall('seekahostcdn', $method . ' ' . $path, ['query' => $query, 'body' => $loggedBody],
                 $logged, 'HTTP ' . $code, [$this->apiKey]);
         }
 
