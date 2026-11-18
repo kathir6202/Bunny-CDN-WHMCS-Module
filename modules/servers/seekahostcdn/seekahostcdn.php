@@ -477,6 +477,17 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
     if (!$readOnly && !$ctx['active']) {
         seekahostcdn_json(['success' => false, 'error' => 'This service is not active.']);
     }
+
+    // Throttle actions that are expensive for this server or bunny.net
+    $cooldowns = ['import' => 60, 'purge' => 10, 'purge_urls' => 5, 'ssl' => 20, 'storage_reset' => 60, 'settings_save' => 3];
+    if (isset($cooldowns[$action])) {
+        $key = 'shcdn_throttle_' . (int) $row->service_id . '_' . $action;
+        $wait = (int) ($_SESSION[$key] ?? 0) + $cooldowns[$action] - time();
+        if ($wait > 0) {
+            seekahostcdn_json(['success' => false, 'error' => "Please wait {$wait} seconds before trying again."]);
+        }
+        $_SESSION[$key] = time();
+    }
     $dnsAction = in_array($action, ['records', 'add', 'update', 'delete', 'import'], true);
     if ($dnsAction && ($row->mode ?? 'dns') !== 'dns') {
         seekahostcdn_json(['success' => false, 'error' => 'DNS for this domain is managed at your own DNS provider.']);

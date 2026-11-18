@@ -10,6 +10,12 @@ if (is_dir($tmp)) {
 }
 mkdir($tmp . '/tplc', 0777, true);
 touch($tmp . '/whmcs.sqlite');
+if (getenv('SHT_DB') === 'mysql') {
+    $pdo = new PDO('mysql:host=127.0.0.1', 'sht', 'sht');
+    $pdo->exec('DROP DATABASE IF EXISTS whmcs_test');
+    $pdo->exec('CREATE DATABASE whmcs_test CHARACTER SET utf8mb4');
+    echo "Database: MySQL/MariaDB (strict mode)\n";
+}
 
 require __DIR__ . '/bootstrap.php';
 

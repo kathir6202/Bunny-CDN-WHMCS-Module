@@ -99,7 +99,11 @@ namespace {
     class_alias(DB::class, 'WHMCS\Database\Capsule');
 
     $db = new DB();
-    $db->addConnection(['driver' => 'sqlite', 'database' => SHT_TMP . '/whmcs.sqlite']);
+    // SHT_DB=mysql runs against MariaDB/MySQL (strict mode, like production WHMCS)
+    $db->addConnection(getenv('SHT_DB') === 'mysql'
+        ? ['driver' => 'mysql', 'host' => '127.0.0.1', 'database' => 'whmcs_test', 'username' => 'sht', 'password' => 'sht',
+            'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci', 'strict' => true]
+        : ['driver' => 'sqlite', 'database' => SHT_TMP . '/whmcs.sqlite']);
     $db->setAsGlobal();
 
     if (!DB::schema()->hasTable('tblhosting')) {
@@ -112,7 +116,13 @@ namespace {
         $s->create('tblhostingaddons', function ($t) { $t->increments('id'); $t->integer('hostingid'); $t->string('status'); });
         $s->create('tblinvoices', function ($t) { $t->increments('id'); $t->integer('userid'); $t->string('status'); $t->date('duedate'); $t->decimal('total', 10, 2)->default(0); });
         $s->create('tbltodolist', function ($t) { $t->increments('id'); $t->date('date'); $t->string('title'); $t->text('description'); $t->integer('admin'); $t->string('status'); $t->date('duedate'); });
-        $s->create('tblemailtemplates', function ($t) { $t->increments('id'); $t->string('type'); $t->string('name'); $t->string('subject'); $t->text('message'); $t->integer('custom')->default(0); $t->string('language')->default(''); });
+        // Like WHMCS: several NOT NULL columns without defaults
+        $s->create('tblemailtemplates', function ($t) {
+            $t->increments('id'); $t->string('type'); $t->string('name'); $t->text('subject'); $t->text('message');
+            $t->text('attachments'); $t->text('fromname'); $t->text('fromemail'); $t->boolean('disabled'); $t->boolean('custom');
+            $t->text('language'); $t->text('copyto'); $t->text('blind_copy_to'); $t->boolean('plaintext');
+            $t->timestamp('created_at')->nullable(); $t->timestamp('updated_at')->nullable();
+        });
         $s->create('tblhosting', function ($t) {
             $t->increments('id'); $t->integer('userid'); $t->integer('packageid'); $t->integer('server'); $t->string('domain'); $t->string('domainstatus');
             $t->string('suspendreason')->default(''); $t->string('dedicatedip')->default(''); $t->string('ns1')->default(''); $t->string('ns2')->default('');

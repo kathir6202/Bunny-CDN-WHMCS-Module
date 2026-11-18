@@ -268,8 +268,10 @@ class BunnyClient
         $decoded = ($raw !== false && $raw !== '') ? json_decode($raw, true) : null;
 
         if (function_exists('logModuleCall')) {
+            // Never write passwords or keys (e.g. storage zone FTP passwords) to the module log
+            $logged = $raw === false ? $curlError : preg_replace('/"(Password|ReadOnlyPassword|AccessKey|ApiKey)"\s*:\s*"[^"]*"/i', '"$1":"***"', $raw);
             logModuleCall('seekahostcdn', $method . ' ' . $path, ['query' => $query, 'body' => $body],
-                $raw === false ? $curlError : $raw, 'HTTP ' . $code, [$this->apiKey]);
+                $logged, 'HTTP ' . $code, [$this->apiKey]);
         }
 
         if ($raw === false) {

@@ -16,6 +16,13 @@ with your per-GB price; admins see bunny.net cost vs your price and margin.
 | Billing | Monthly invoice per service: bandwidth GB × your price (+ storage GB × storage price), converted to the client's currency, never billed twice, final invoice on cancellation. CDN is **suspended as soon as a usage invoice is past its due date** and restored when it is paid |
 | Admin | Margin dashboard (bunny.net USD cost converted to your default currency), billing history with retry, **import existing bunny.net pull zones**, add/remove hostnames and run actions from the service page |
 
+## Requirements
+
+- WHMCS 8.0 or later (uses only documented WHMCS functions, hooks and module APIs)
+- PHP 7.4 – 8.4 (checked with PHPCompatibility), with curl
+- MySQL / MariaDB, including strict SQL mode
+- A bunny.net account API key
+
 ## Files
 
 ```

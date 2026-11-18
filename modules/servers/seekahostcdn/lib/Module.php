@@ -211,7 +211,23 @@ class Module
             $server = Capsule::table('tblservers')->where('type', self::MODULE)->where('disabled', 0)
                 ->where('accesshash', '!=', '')->orderBy('id')->first();
         }
-        return $server ? trim((string) $server->accesshash) : '';
+        return $server ? self::serverKey($server) : '';
+    }
+
+    /**
+     * API key from a server row. bunny.net keys are hex/UUID style; if a future WHMCS
+     * stores the access hash encrypted, decrypt it with WHMCS's own decrypt().
+     */
+    private static function serverKey($server)
+    {
+        $key = trim((string) $server->accesshash);
+        if ($key !== '' && !preg_match('/^[0-9a-f-]{20,}$/i', $key) && function_exists('decrypt')) {
+            $plain = trim((string) decrypt($key));
+            if (preg_match('/^[0-9a-f-]{20,}$/i', $plain)) {
+                return $plain;
+            }
+        }
+        return $key;
     }
 
     public static function clientForParams(array $params)
@@ -1059,7 +1075,7 @@ class Module
      * Request free certificates for hostnames that already point at the CDN
      * (bunny.net nameservers in dns mode, a CNAME per hostname in cname mode).
      */
-    public static function issueSsl($row, BunnyClient $bunny = null)
+    public static function issueSsl($row, ?BunnyClient $bunny = null)
     {
         $bunny = $bunny ?: self::clientForRow($row);
         $hostnames = self::decodeList($row->hostnames);
@@ -1099,13 +1115,13 @@ class Module
     // ===================================================== Suspend / terminate
 
     /** Stop serving: a 1-byte monthly limit makes bunny.net refuse requests. DNS keeps working. */
-    public static function suspendRow($row, BunnyClient $bunny = null)
+    public static function suspendRow($row, ?BunnyClient $bunny = null)
     {
         ($bunny ?: self::clientForRow($row))->updatePullZone($row->pull_zone_id, ['MonthlyBandwidthLimit' => 1]);
         self::touchZone($row->service_id, ['suspended' => 1]);
     }
 
-    public static function unsuspendRow($row, BunnyClient $bunny = null, $limitBytes = null)
+    public static function unsuspendRow($row, ?BunnyClient $bunny = null, $limitBytes = null)
     {
         $limit = $limitBytes !== null ? (int) $limitBytes : (int) $row->limit_bytes;
         ($bunny ?: self::clientForRow($row))->updatePullZone($row->pull_zone_id, ['MonthlyBandwidthLimit' => $limit]);
@@ -1163,7 +1179,7 @@ class Module
         return self::terminateRow($row, self::clientForParams($params));
     }
 
-    public static function terminateRow($row, BunnyClient $bunny = null)
+    public static function terminateRow($row, ?BunnyClient $bunny = null)
     {
         $bunny = $bunny ?: self::clientForRow($row);
 
@@ -1202,7 +1218,7 @@ class Module
     // ================================================================= Usage
 
     /** Snapshot month-to-date bandwidth, storage and bunny.net cost for one zone. */
-    public static function syncUsage($row, BunnyClient $bunny = null)
+    public static function syncUsage($row, ?BunnyClient $bunny = null)
     {
         $bunny = $bunny ?: self::clientForRow($row);
         $zone = $bunny->getPullZone($row->pull_zone_id);
@@ -1379,7 +1395,7 @@ class Module
      * Warn at the configured percentage, and at 100% email the client, add an
      * admin To-Do and optionally suspend. Each alert is sent once per month.
      */
-    public static function checkOverage($row, $bytes, BunnyClient $bunny = null)
+    public static function checkOverage($row, $bytes, ?BunnyClient $bunny = null)
     {
         $limit = (int) $row->limit_bytes;
         if ($limit <= 0 || $row->suspended || !in_array(self::serviceStatus($row), ['Active'], true)) {
@@ -1413,7 +1429,7 @@ class Module
         }
     }
 
-    private static function suspendForOverage($row, BunnyClient $bunny = null)
+    private static function suspendForOverage($row, ?BunnyClient $bunny = null)
     {
         $reason = 'CDN bandwidth limit exceeded';
         if (($row->source ?? 'product') === 'product') {
@@ -1507,10 +1523,19 @@ class Module
         try {
             foreach (self::$emailTemplates as $name => $tpl) {
                 if (!Capsule::table('tblemailtemplates')->where('type', 'product')->where('name', $name)->exists()) {
-                    Capsule::table('tblemailtemplates')->insert([
+                    $data = [
                         'type' => 'product', 'name' => $name, 'subject' => $tpl['subject'],
                         'message' => $tpl['message'], 'custom' => 1, 'language' => '',
-                    ]);
+                    ];
+                    // MySQL strict mode: fill WHMCS's NOT NULL columns that have no default
+                    $defaults = ['attachments' => '', 'fromname' => '', 'fromemail' => '', 'copyto' => '', 'blind_copy_to' => '',
+                        'plaintext' => 0, 'disabled' => 0, 'created_at' => date('Y-m-d H:i:s'), 'updated_at' => date('Y-m-d H:i:s')];
+                    foreach ($defaults as $col => $value) {
+                        if (Capsule::schema()->hasColumn('tblemailtemplates', $col)) {
+                            $data[$col] = $value;
+                        }
+                    }
+                    Capsule::table('tblemailtemplates')->insert($data);
                 }
             }
         } catch (\Exception $e) {
@@ -1576,7 +1601,7 @@ class Module
      * Invoice one service for one month (Y-m). $toDate limits the period for a
      * part month (used at termination). Never invoices the same month twice.
      */
-    public static function billServiceMonth($row, $month, BunnyClient $bunny = null, $toDate = null)
+    public static function billServiceMonth($row, $month, ?BunnyClient $bunny = null, $toDate = null)
     {
         $settings = self::settings();
         if (!self::isBillable($row)) {

@@ -9,4 +9,4 @@ php -S 127.0.0.1:8977 fake-bunny.php > /dev/null 2>&1 &
 FAKE_PID=$!
 trap 'kill $FAKE_PID 2>/dev/null' EXIT
 sleep 1
-php run.php
+php run.php "$@"
