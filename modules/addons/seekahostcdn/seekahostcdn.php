@@ -26,7 +26,7 @@ function seekahostcdn_config()
     return [
         'name' => 'SeekaHost CDN',
         'description' => 'bunny.net CDN reselling: per-GB pricing, monthly usage invoices and cost/margin reports.',
-        'version' => '2.4.0',
+        'version' => '2.4.1',
         'author' => 'SeekaHost',
         'language' => 'english',
         'fields' => [
@@ -137,7 +137,7 @@ function seekahostcdn_activate()
         return ['status' => 'error', 'description' => 'Upload the server module to modules/servers/seekahostcdn/ first.'];
     }
     try {
-        SeekahostCDN\Module::ensureSchema();
+        SeekahostCDN\Module::ensureSchema(true);
         return ['status' => 'success', 'description' => 'SeekaHost CDN activated. Set your price per GB under Configure.'];
     } catch (Exception $e) {
         return ['status' => 'error', 'description' => 'Could not create tables: ' . $e->getMessage()];
@@ -147,7 +147,7 @@ function seekahostcdn_activate()
 function seekahostcdn_upgrade($vars)
 {
     if (class_exists('SeekahostCDN\\Module')) {
-        SeekahostCDN\Module::ensureSchema();
+        SeekahostCDN\Module::ensureSchema(true);
     }
 }
 

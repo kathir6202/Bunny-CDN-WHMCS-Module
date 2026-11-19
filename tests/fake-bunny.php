@@ -269,9 +269,12 @@ if (preg_match('#^/pullzone/(\d+)(/(\w+))?$#', $p, $x)) {
         out(200, $s['pz'][$pid]);
     }
     if ($op === 'addHostname') {
-        foreach ($s['pz'][$pid]['Hostnames'] as $h) {
-            if ($h['Value'] === $b['Hostname']) {
-                out(400, ['Message' => 'The hostname is already registered']);
+        // Like bunny.net: a hostname can only be on one pull zone in the account
+        foreach ($s['pz'] as $zone) {
+            foreach ($zone['Hostnames'] as $h) {
+                if ($h['Value'] === $b['Hostname']) {
+                    out(400, ['Message' => 'The hostname is already registered']);
+                }
             }
         }
         $s['pz'][$pid]['Hostnames'][] = ['Value' => $b['Hostname'], 'IsSystemHostname' => false, 'HasCertificate' => false, 'ForceSSL' => false];

@@ -18,6 +18,9 @@ class Module
 {
     const MODULE = 'seekahostcdn';
     const BYTES_PER_GB = 1000000000; // bandwidth is billed in decimal GB, as bunny.net does
+    const SCHEMA_VERSION = '2.4.1';  // bump whenever ensureSchema() changes
+
+    private static $schemaChecked = false;
 
     // Record types a client may create from the client area
     public static $clientRecordTypes = [
@@ -37,8 +40,26 @@ class Module
 
     // ================================================================== Schema
 
-    public static function ensureSchema()
+    /**
+     * Create/upgrade the module tables. The full check (about 45 queries) only runs
+     * when the stored schema version differs, or when $force is set (addon activate/upgrade).
+     */
+    public static function ensureSchema($force = false)
     {
+        if (self::$schemaChecked && !$force) {
+            return;
+        }
+        self::$schemaChecked = true;
+        if (!$force) {
+            try {
+                $stored = Capsule::table('tbladdonmodules')->where('module', self::MODULE)->where('setting', 'schema_version')->value('value');
+                if ($stored === self::SCHEMA_VERSION && Capsule::schema()->hasTable('mod_seekahostcdn_dns_zones')) {
+                    return;
+                }
+            } catch (\Exception $e) {
+                // fall through to the full check
+            }
+        }
         $schema = Capsule::schema();
 
         if (!$schema->hasTable('mod_seekahostcdn_dns_zones')) {
@@ -132,6 +153,10 @@ class Module
         ]);
 
         self::ensureEmailTemplates();
+        Capsule::table('tbladdonmodules')->updateOrInsert(
+            ['module' => self::MODULE, 'setting' => 'schema_version'],
+            ['value' => self::SCHEMA_VERSION]
+        );
     }
 
     private static function addColumns($table, array $columns)
@@ -519,6 +544,13 @@ class Module
             throw new \Exception("Domain {$domain} is already used by CDN service #{$other->service_id}.");
         }
 
+        foreach (self::hostnamesFor($mode, $domain) as $host) {
+            $owner = self::hostnameOwner($host, $serviceId);
+            if ($owner) {
+                throw new \Exception("Hostname {$host} is already used by CDN service #{$owner}.");
+            }
+        }
+
         // Read the domain's current DNS while it is still live at the old provider
         $discovered = $mode === 'dns' ? self::discoverLocalDns($domain) : self::hostARecords($domain);
         $origin = $useStorage ? '' : self::determineOrigin($params, $domain, $discovered);
@@ -555,16 +587,15 @@ class Module
             $cdnHost = self::systemHostname($pullZone);
 
             $hostnames = [];
-            foreach (self::hostnamesFor($mode, $domain) as $host) {
+            foreach (self::hostnamesFor($mode, $domain) as $i => $host) {
                 try {
-                    $bunny->addHostname($pullZoneId, $host);
+                    self::addHostnameStrict($bunny, $pullZoneId, $host);
                     $hostnames[] = $host;
                 } catch (BunnyException $e) {
-                    if (stripos($e->getMessage(), 'already') !== false) {
-                        $hostnames[] = $host;
-                    } else {
-                        logActivity("SeekaHost CDN: could not add hostname {$host} to pull zone {$pullZoneId}: " . $e->getMessage());
+                    if ($i === 0) {
+                        throw $e; // without its main hostname the CDN cannot serve the site
                     }
+                    logActivity("SeekaHost CDN: could not add hostname {$host} to pull zone {$pullZoneId}: " . $e->getMessage());
                 }
             }
 
@@ -2075,28 +2106,55 @@ class Module
 
     // ============================================================== Hostnames
 
+    /** Service ID of another CDN that already has this hostname, or null. */
+    public static function hostnameOwner($host, $exceptServiceId)
+    {
+        $rows = Capsule::table('mod_seekahostcdn_dns_zones')->where('service_id', '!=', (int) $exceptServiceId)
+            ->where('hostnames', 'like', '%"' . $host . '"%')->get(); // narrowed by LIKE, confirmed exactly below
+        foreach ($rows as $other) {
+            if (in_array($host, self::decodeList($other->hostnames), true)) {
+                return (int) $other->service_id;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Add a hostname to a pull zone. bunny.net says "already registered" both when it
+     * is on this zone and when another zone in the account owns it; only the first is OK.
+     */
+    public static function addHostnameStrict(BunnyClient $bunny, $pullZoneId, $host)
+    {
+        try {
+            $bunny->addHostname($pullZoneId, $host);
+        } catch (BunnyException $e) {
+            if (stripos($e->getMessage(), 'already') === false) {
+                throw $e;
+            }
+            foreach (($bunny->getPullZone($pullZoneId)['Hostnames'] ?? []) as $h) {
+                if (strcasecmp((string) ($h['Value'] ?? ''), $host) === 0) {
+                    return;
+                }
+            }
+            throw new BunnyException("{$host} is already connected to another pull zone in the bunny.net account.");
+        }
+    }
+
     public static function addHostnameToRow($row, BunnyClient $bunny, $host)
     {
         $host = self::normaliseHost($host);
         if (!self::isValidHostname($host)) {
             throw new \InvalidArgumentException("\"{$host}\" is not a valid hostname.");
         }
-        $other = Capsule::table('mod_seekahostcdn_dns_zones')->where('service_id', '!=', $row->service_id)
-            ->where('hostnames', 'like', '%"' . $host . '"%')->first();
-        if ($other) {
-            throw new \InvalidArgumentException("{$host} is already used by CDN service #{$other->service_id}.");
+        $owner = self::hostnameOwner($host, $row->service_id);
+        if ($owner) {
+            throw new \InvalidArgumentException("{$host} is already used by CDN service #{$owner}.");
         }
         $hostnames = self::decodeList($row->hostnames);
         if (in_array($host, $hostnames, true)) {
             return;
         }
-        try {
-            $bunny->addHostname($row->pull_zone_id, $host);
-        } catch (BunnyException $e) {
-            if (stripos($e->getMessage(), 'already') === false) {
-                throw $e;
-            }
-        }
+        self::addHostnameStrict($bunny, $row->pull_zone_id, $host);
         $hostnames[] = $host;
         self::touchZone($row->service_id, ['hostnames' => json_encode(array_values(array_unique($hostnames)))]);
     }
@@ -2431,8 +2489,13 @@ class Module
             $ttl = $defaultTtl;
             while ($tokens && !isset($types[strtoupper($tokens[0]['v'])])) {
                 $t = strtoupper($tokens[0]['v']);
-                if (ctype_digit($t)) {
-                    $ttl = (int) $t;
+                if (preg_match('/^(\d+[SMHDW]?)+$/', $t)) {
+                    // BIND TTLs: 3600, 1H, 1h30m, 1D, 1W
+                    preg_match_all('/(\d+)([SMHDW]?)/', $t, $parts, PREG_SET_ORDER);
+                    $ttl = 0;
+                    foreach ($parts as $part) {
+                        $ttl += (int) $part[1] * ['' => 1, 'S' => 1, 'M' => 60, 'H' => 3600, 'D' => 86400, 'W' => 604800][$part[2]];
+                    }
                 } elseif (!in_array($t, ['IN', 'CH', 'HS'], true)) {
                     break; // a type we do not import (SOA, NS, ...)
                 }
@@ -2465,7 +2528,11 @@ class Module
                 case 'SRV': $in += ['priority' => $v[0] ?? 0, 'weight' => $v[1] ?? 0, 'port' => $v[2] ?? 0, 'value' => $target($v[3] ?? '')]; break;
                 case 'CAA': $in += ['flags' => $v[0] ?? 0, 'tag' => $v[1] ?? 'issue', 'value' => $v[2] ?? '']; break;
                 case 'CNAME': $in['value'] = $target($v[0] ?? ''); break;
-                case 'TXT': $in['value'] = implode('', $v); break;
+                case 'TXT':
+                    // Quoted strings are joined as-is; unquoted words keep their spaces
+                    $quoted = array_filter(array_column($tokens, 'q'));
+                    $in['value'] = implode($quoted ? '' : ' ', $v);
+                    break;
                 default: $in['value'] = $v[0] ?? '';
             }
             try {
@@ -2555,6 +2622,12 @@ class Module
         };
         $limits = array_filter([$toBytes(ini_get('upload_max_filesize')), $toBytes(ini_get('post_max_size'))]);
         return $limits ? min($limits) : 2097152;
+    }
+
+    /** PHP upload limits are binary (2M = 2 MiB): show them the way php.ini states them. */
+    public static function formatUploadLimit($bytes)
+    {
+        return $bytes >= 1073741824 ? round($bytes / 1073741824, 1) . ' GB' : round($bytes / 1048576, 1) . ' MB';
     }
 
     // ============================================================= Replication
@@ -2684,13 +2757,11 @@ class Module
         if (in_array($host, $hostnames, true)) {
             return;
         }
-        try {
-            $bunny->addHostname($row->pull_zone_id, $host);
-        } catch (BunnyException $e) {
-            if (stripos($e->getMessage(), 'already') === false) {
-                throw $e;
-            }
+        $owner = self::hostnameOwner($host, $row->service_id);
+        if ($owner) {
+            throw new \InvalidArgumentException("{$host} is already used by another CDN service.");
         }
+        self::addHostnameStrict($bunny, $row->pull_zone_id, $host);
         $hostnames[] = $host;
         self::touchZone($row->service_id, ['hostnames' => json_encode(array_values(array_unique($hostnames)))]);
     }

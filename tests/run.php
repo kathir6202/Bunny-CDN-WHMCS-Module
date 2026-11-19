@@ -98,6 +98,11 @@ foreach (['mod_seekahostcdn_dns_zones', 'mod_seekahostcdn_usage', 'mod_seekahost
 ok(DB::table('tblemailtemplates')->where('type', 'product')->count() === 2, 'two bandwidth email templates created');
 seekahostcdn_activate();
 ok(DB::table('tblemailtemplates')->count() === 2, 're-activating does not duplicate templates');
+ok(DB::table('tbladdonmodules')->where('setting', 'schema_version')->value('value') === SeekahostCDN\Module::SCHEMA_VERSION, 'schema version stored, so later page loads skip the table checks');
+DB::enableQueryLog();
+CDN::ensureSchema();
+ok(count(DB::getQueryLog()) === 0, 'repeat schema check in the same request costs no queries');
+DB::disableQueryLog();
 ok(seekahostcdn_TestConnection(params(1))['success'] === true, 'Test Connection succeeds with valid key');
 ok(seekahostcdn_TestConnection(params(1, ['serveraccesshash' => 'wrong']))['success'] === false, 'Test Connection fails with wrong key');
 ok(count(seekahostcdn_ConfigOptions()) === 7, 'product has 7 module settings');
@@ -156,6 +161,15 @@ $res = seekahostcdn_CreateAccount(params(5, ['domain' => 'example.com']));
 ok(strpos($res, 'already used') !== false, 'same domain on two services is refused', $res);
 $res = seekahostcdn_CreateAccount(params(5, ['domain' => 'not a domain']));
 ok(strpos($res, 'not a valid domain') !== false, 'invalid domain refused', $res);
+
+// A hostname that belongs to another pull zone in the account must not be claimed
+$foreign = json_decode(shell_exec("curl -s -X POST -H 'AccessKey: test-key' -d '{\"Name\":\"foreign-zone\",\"OriginUrl\":\"http://203.0.113.5\"}' http://127.0.0.1:8977/pullzone"), true);
+shell_exec("curl -s -o /dev/null -X POST -H 'AccessKey: test-key' -d '{\"Hostname\":\"failpz.example.com\"}' http://127.0.0.1:8977/pullzone/{$foreign['Id']}/addHostname");
+$res = seekahostcdn_CreateAccount(params(7));
+ok(strpos($res, 'another pull zone') !== false && row(7) === null, 'hostname owned by another pull zone is refused, not claimed', $res);
+fakeEdit(function ($s) use ($foreign) { unset($s['pz'][$foreign['Id']]); return $s; });
+$res = seekahostcdn_CreateAccount(params(5, ['domain' => 'www.example.com', 'configoption4' => 'CNAME only', 'configoption1' => '203.0.113.77']));
+ok(strpos($res, 'already used by CDN service #1') !== false, 'hostname used by another CDN service refused before anything is created', $res);
 
 section('Selling modes: included with hosting / paid addon');
 run_hook('AfterModuleCreate', ['params' => params(4, ['moduletype' => 'cpanel'])]);
@@ -382,6 +396,11 @@ ok(hasRecord($recs, 3, '', 'part one part two'), 'multi-part TXT joined');
 ok(hasRecord($recs, 8, '_svc._tcp', 'sip.example.net'), 'SRV imported');
 ok(strpos($res['message'], 'Line') !== false && !hasRecord($recs, 0, 'bad'), 'invalid record reported with its line number, not added');
 ok(!hasRecord($recs, 0, 'other.org') && preg_match('/(\d+) skipped/', $res['message'], $m) && (int) $m[1] >= 3, 'SOA, NS and out-of-zone records skipped');
+$res = ajax(1, 'shcdn_action=zone_import&zone=' . urlencode("ttlrec 1h30m IN A 192.0.2.60\nplain 1D IN TXT v=spf1 include:example.net ~all"));
+$recs = recordsOf($z1->dns_zone_id);
+$ttlrec = array_values(array_filter($recs, function ($r) { return $r['Name'] === 'ttlrec'; }));
+ok(($ttlrec[0]['Ttl'] ?? 0) === 5400, 'BIND TTL units (1h30m) understood');
+ok(hasRecord($recs, 3, 'plain', 'v=spf1 include:example.net ~all'), 'unquoted TXT keeps its spaces');
 $res = ajax(1, 'shcdn_action=zone_import&zone=' . urlencode(ajax(1, 'shcdn_action=zone_export')['text']));
 ok($res['success'] && strpos($res['message'], '0 record(s) added') === 0, 're-importing our own export adds nothing (round trip)');
 file_put_contents(SHT_TMP . '/big.zone', 'shcdn_action=zone_import&token=tok123&zone=' . str_repeat('a', 300000));

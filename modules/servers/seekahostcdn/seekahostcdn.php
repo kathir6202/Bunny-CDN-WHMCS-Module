@@ -513,7 +513,7 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
 
     // Throttle actions that are expensive for this server or bunny.net
     $cooldowns = ['import' => 60, 'purge' => 10, 'purge_urls' => 5, 'ssl' => 20, 'storage_reset' => 60, 'settings_save' => 3,
-        'token_reset' => 60, 'cert_upload' => 10, 'dnssec_enable' => 10, 'dnssec_disable' => 10, 'zone_import' => 30, 'logs_download' => 5];
+        'token_reset' => 60, 'cert_upload' => 10, 'dnssec_enable' => 10, 'dnssec_disable' => 10, 'zone_import' => 10, 'logs_download' => 5];
     if (isset($cooldowns[$action])) {
         $key = 'shcdn_throttle_' . (int) $row->service_id . '_' . $action;
         $wait = (int) ($_SESSION[$key] ?? 0) + $cooldowns[$action] - time();
@@ -642,7 +642,8 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
 
             case 'logs_download':
                 $date = (string) ($_POST['date'] ?? '');
-                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > date('Y-m-d') || $date < date('Y-m-d', strtotime('-3 days'))) {
+                // bunny.net names log files by UTC date, as the browser does
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > gmdate('Y-m-d', time() + 86400) || $date < gmdate('Y-m-d', strtotime('-3 days'))) {
                     throw new InvalidArgumentException('Logs are kept for the last 3 days only.');
                 }
                 if (empty($bunny->getPullZone($row->pull_zone_id)['EnableLogging'])) {
@@ -664,7 +665,7 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
                 $file = $_FILES['file'] ?? null;
                 if (!$file || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name'])) {
                     $tooBig = in_array($file['error'] ?? 0, [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true);
-                    throw new InvalidArgumentException($tooBig ? 'The file is larger than this server accepts (' . CDN::formatBytes(CDN::maxUploadBytes()) . '). Use FTP for large files.' : 'The upload failed. Please try again.');
+                    throw new InvalidArgumentException($tooBig ? 'The file is larger than this server accepts (' . CDN::formatUploadLimit(CDN::maxUploadBytes()) . '). Use FTP for large files.' : 'The upload failed. Please try again.');
                 }
                 $target = CDN::storagePath($folder . '/' . basename((string) $file['name']));
                 CDN::storageClient($row, $bunny)->upload($target, $file['tmp_name']);
@@ -748,7 +749,7 @@ function seekahostcdn_clientVars($row, array $ctx, $serviceId)
         'dnssec' => CDN::dnssecInfo($row),
         'storageName' => (string) ($row->storage_zone_name ?? ''),
         'maxUpload' => CDN::maxUploadBytes(),
-        'maxUploadText' => CDN::formatBytes(CDN::maxUploadBytes()),
+        'maxUploadText' => CDN::formatUploadLimit(CDN::maxUploadBytes()),
         'hostnames' => $hostnames,
         'cacheChoices' => CDN::$cacheChoices,
         'typeNames' => BunnyClient::$recordTypeNames,
