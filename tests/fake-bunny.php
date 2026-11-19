@@ -28,9 +28,79 @@ function nid()
     return ++$s['seq'];
 }
 
+// ------------------------------------------- Edge Storage API (zone password)
+if (preg_match('#^/__storage/([^/]+)(/.*)?$#', $p, $x)) {
+    $zoneName = rawurldecode($x[1]);
+    $path = rawurldecode(ltrim($x[2] ?? '/', '/'));
+    $zone = null;
+    foreach ($s['sz'] as $z) {
+        if ($z['Name'] === $zoneName) {
+            $zone = $z;
+        }
+    }
+    if (!$zone || ($_SERVER['HTTP_ACCESSKEY'] ?? '') !== $zone['Password']) {
+        out(401, ['Message' => 'Unauthorized']);
+    }
+    $files = &$s['files'][$zoneName];
+    $files = $files ?? [];
+    $isDir = $path === '' || substr($path, -1) === '/';
+    $prefix = rtrim($path, '/');
+    if ($m === 'PUT') {
+        $files[$path] = ['data' => base64_encode(file_get_contents('php://input')), 'time' => gmdate('Y-m-d\TH:i:s')];
+        out(201, ['HttpCode' => 201, 'Message' => 'File uploaded.']);
+    }
+    if ($m === 'DELETE') {
+        $found = false;
+        foreach (array_keys($files) as $file) {
+            if ($file === $prefix || ($isDir && strpos($file, $prefix . '/') === 0)) {
+                unset($files[$file]);
+                $found = true;
+            }
+        }
+        out($found ? 200 : 404, ['Message' => $found ? 'Deleted' : 'Object Not Found']);
+    }
+    if ($m === 'GET' && $isDir) {
+        $list = [];
+        foreach ($files as $file => $meta) {
+            $rel = $prefix === '' ? $file : (strpos($file, $prefix . '/') === 0 ? substr($file, strlen($prefix) + 1) : null);
+            if ($rel === null) {
+                continue;
+            }
+            $parts = explode('/', $rel);
+            $name = $parts[0];
+            $list[$name] = count($parts) > 1
+                ? ['ObjectName' => $name, 'IsDirectory' => true, 'Length' => 0, 'LastChanged' => $meta['time']]
+                : ['ObjectName' => $name, 'IsDirectory' => false, 'Length' => strlen(base64_decode($meta['data'])), 'LastChanged' => $meta['time']];
+        }
+        out(200, array_values($list));
+    }
+    if ($m === 'GET') {
+        if (!isset($files[$path])) {
+            out(404, ['Message' => 'Object Not Found']);
+        }
+        file_put_contents($f, json_encode($s));
+        header('Content-Type: application/octet-stream');
+        echo base64_decode($files[$path]['data']);
+        exit;
+    }
+}
+
 if (($_SERVER['HTTP_ACCESSKEY'] ?? '') !== 'test-key') {
     out(401, ['Message' => 'The request authorization failed']);
 }
+// --------------------------------------------------------- Logging service
+if (preg_match('#^/__logging/(\d\d-\d\d-\d\d)/(\d+)\.log$#', $p, $x)) {
+    $z = $s['pz'][$x[2]] ?? null;
+    if (!$z || empty($z['EnableLogging'])) {
+        out(404, ['Message' => 'Not found']);
+    }
+    file_put_contents($f, json_encode($s));
+    header('Content-Type: text/plain');
+    echo "HIT|200|1700000000000|1024|{$x[2]}|203.0.113.1|-|https://example.com/a.css|DE|Mozilla|abc|DE\n";
+    echo "MISS|404|1700000001000|512|{$x[2]}|203.0.113.2|-|https://example.com/missing|US|curl|def|US\n";
+    exit;
+}
+
 // Tests can make one endpoint fail: state "fail" => ["POST /pullzone" => 500]
 if (isset($s['fail']["$m $p"])) {
     out($s['fail']["$m $p"], ['Message' => 'Simulated failure']);
@@ -57,6 +127,13 @@ if ($m === 'POST' && $p === '/dnszone/records/scan') {
 }
 if (preg_match('#^/dnszone/(\d+)/records/scan$#', $p)) {
     out(200, ['Status' => 2, 'Records' => [['Type' => 'TXT', 'Name' => '@', 'Value' => 'scan-found-txt', 'Ttl' => 300]]]);
+}
+if (preg_match('#^/dnszone/(\d+)/dnssec$#', $p, $x)) {
+    if (!isset($s['dns'][$x[1]])) {
+        out(404, ['Message' => 'Zone not found']);
+    }
+    $s['dns'][$x[1]]['DnsSecEnabled'] = $m === 'POST';
+    out(200, $m === 'POST' ? ['Enabled' => true, 'KeyTag' => 12345, 'Algorithm' => 13, 'DigestType' => 2, 'Digest' => 'ABCDEF0123456789', 'Flags' => 257, 'PublicKey' => 'mdsswUyr3DPW132mOi8V9xESWE8jTo0d'] : []);
 }
 if (preg_match('#^/dnszone/(\d+)(/records(?:/(\d+))?)?$#', $p, $x)) {
     $zid = $x[1];
@@ -109,7 +186,7 @@ if ($m === 'POST' && $p === '/storagezone') {
             out(400, ['Message' => 'The storage zone name is already taken']);
         }
     }
-    $z = ['Id' => nid(), 'Name' => $b['Name'], 'Region' => $b['Region'], 'Password' => 'pw-' . substr(md5(mt_rand()), 0, 12),
+    $z = ['Id' => nid(), 'Name' => $b['Name'], 'Region' => $b['Region'], 'ReplicationRegions' => $b['ReplicationRegions'] ?? [], 'Password' => 'pw-' . substr(md5(mt_rand()), 0, 12),
         'ReadOnlyPassword' => 'ro-' . substr(md5(mt_rand()), 0, 12),
         'StorageHostname' => $b['Region'] === 'DE' ? 'storage.bunnycdn.com' : strtolower($b['Region']) . '.storage.bunnycdn.com',
         'StorageUsed' => 3000000000, 'FilesStored' => 42];
@@ -127,6 +204,10 @@ if ($p === '/storagezone/resetPassword') {
 if (preg_match('#^/storagezone/(\d+)$#', $p, $x)) {
     if (!isset($s['sz'][$x[1]])) {
         out(404, ['Message' => 'Storage zone not found']);
+    }
+    if ($m === 'POST') {
+        $s['sz'][$x[1]]['ReplicationRegions'] = $b['ReplicationZones'] ?? [];
+        out(204);
     }
     if ($m === 'GET') {
         out(200, $s['sz'][$x[1]]);
@@ -238,7 +319,13 @@ if ($p === '/statistics') {
     for ($d = strtotime(substr($_GET['dateFrom'], 0, 10)); $d <= strtotime(substr($_GET['dateTo'], 0, 10)); $d += 86400) {
         $chart[date('Y-m-d', $d) . 'T00:00:00Z'] = (int) (2e8 + abs(sin($d / 90000)) * 6e8);
     }
-    out(200, ['TotalBandwidthUsed' => 12500000000, 'TotalRequestsServed' => 123456, 'CacheHitRate' => 91.27, 'BandwidthUsedChart' => $chart]);
+    $res = ['TotalBandwidthUsed' => 12500000000, 'TotalRequestsServed' => 123456, 'CacheHitRate' => 91.27, 'BandwidthUsedChart' => $chart,
+        'GeoTrafficDistribution' => ['EU: Germany (DE)' => 5000000000, 'NA: United States (US)' => 6000000000, 'AS: Singapore (SG)' => 1500000000],
+        'TotalOriginTraffic' => 1200000000, 'AverageOriginResponseTime' => 42];
+    if (($_GET['loadErrors'] ?? '') === 'true') {
+        $res += ['Error3xxChart' => ['2026-01-01T00:00:00Z' => 100], 'Error4xxChart' => ['2026-01-01T00:00:00Z' => 456], 'Error5xxChart' => ['2026-01-01T00:00:00Z' => 7]];
+    }
+    out(200, $res);
 }
 
 out(404, ['Message' => "No route $m $p"]);

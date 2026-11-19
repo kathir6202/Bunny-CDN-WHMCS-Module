@@ -26,6 +26,7 @@ class BunnyException extends \Exception
 class BunnyClient
 {
     public static $baseUrl = 'https://api.bunny.net';
+    public static $logBaseUrl = 'https://logging.bunnycdn.com';
 
     // Bunny DNS record types
     const REC_A = 0;
@@ -239,14 +240,93 @@ class BunnyClient
     /**
      * Traffic statistics for a pull zone over a date range (Y-m-d, inclusive).
      */
-    public function getStatistics($pullZoneId, $dateFrom, $dateTo, $hourly = false)
+    public function getStatistics($pullZoneId, $dateFrom, $dateTo, $hourly = false, $loadErrors = false)
     {
-        return $this->request('GET', '/statistics', null, [
+        $query = [
             'pullZone' => (int) $pullZoneId,
             'dateFrom' => $dateFrom . 'T00:00:00Z',
             'dateTo' => $dateTo . 'T23:59:59Z',
             'hourly' => $hourly ? 'true' : 'false',
+        ];
+        if ($loadErrors) {
+            $query['loadErrors'] = 'true';
+        }
+        return $this->request('GET', '/statistics', null, $query);
+    }
+
+    // ------------------------------------------------------------------ DNSSEC
+
+    /** Enable DNSSEC; returns the DS record details for the registrar. */
+    public function enableDnssec($zoneId)
+    {
+        return $this->request('POST', '/dnszone/' . (int) $zoneId . '/dnssec');
+    }
+
+    public function disableDnssec($zoneId)
+    {
+        return $this->request('DELETE', '/dnszone/' . (int) $zoneId . '/dnssec');
+    }
+
+    public function updateStorageZone($storageZoneId, array $data)
+    {
+        return $this->request('POST', '/storagezone/' . (int) $storageZoneId, $data);
+    }
+
+    // ----------------------------------------------------------------- Logging
+
+    /**
+     * Stream one day's access log (Y-m-d) of a pull zone. $onStart runs once the
+     * download is known to succeed, $onChunk receives the data. Returns bytes sent.
+     */
+    public function streamLog($pullZoneId, $date, callable $onStart, callable $onChunk)
+    {
+        $url = self::$logBaseUrl . '/' . date('m-d-y', strtotime($date)) . '/' . (int) $pullZoneId . '.log';
+        return self::streamUrl($url, ['AccessKey: ' . $this->apiKey], $onStart, $onChunk, 'GET log ' . $date);
+    }
+
+    /** GET a URL and stream the body to callbacks; shared with the storage client. */
+    public static function streamUrl($url, array $headers, callable $onStart, callable $onChunk, $logLabel)
+    {
+        $ch = curl_init($url);
+        $started = false;
+        $errorBody = '';
+        $bytes = 0;
+        curl_setopt_array($ch, [
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 600,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) use (&$started, &$errorBody, &$bytes, $onStart, $onChunk) {
+                $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                if ($code < 200 || $code >= 300) {
+                    $errorBody .= substr($data, 0, 2000);
+                    return strlen($data);
+                }
+                if (!$started) {
+                    $started = true;
+                    $onStart();
+                }
+                $onChunk($data);
+                $bytes += strlen($data);
+                return strlen($data);
+            },
         ]);
+        $ok = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        if (function_exists('logModuleCall')) {
+            logModuleCall('seekahostcdn', $logLabel, [], $started ? "{$bytes} bytes streamed" : ($ok === false ? $err : $errorBody), 'HTTP ' . $code);
+        }
+        if ($ok === false && !$started) {
+            throw new BunnyException('Could not reach bunny.net: ' . $err);
+        }
+        if (!$started && ($code < 200 || $code >= 300)) {
+            throw new BunnyException($code === 404 ? 'Not found.' : 'bunny.net returned HTTP ' . $code, $code);
+        }
+        if (!$started) {
+            $onStart(); // empty file
+        }
+        return $bytes;
     }
 
     // -------------------------------------------------------------------- Core

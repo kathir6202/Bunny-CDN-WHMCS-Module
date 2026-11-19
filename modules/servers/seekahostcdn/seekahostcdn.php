@@ -65,6 +65,12 @@ function seekahostcdn_ConfigOptions()
             'Default' => 'DE (Falkenstein)',
             'Description' => 'Main storage region (only used with a storage zone).',
         ],
+        'Storage Replication Regions' => [
+            'Type' => 'text',
+            'Size' => '30',
+            'Default' => '',
+            'Description' => 'Optional extra copies, e.g. "NY, SG" (DE, UK, SE, NY, LA, SG, SYD, BR, JH). bunny.net bills each copy; storage is invoiced per copy. Regions cannot be removed once added.',
+        ],
     ];
 }
 
@@ -292,7 +298,9 @@ function seekahostcdn_adminFields($row)
                 . ($row->dns_zone_id ? ' &nbsp; DNS zone <code>' . $e($row->dns_zone_id) . '</code>' : '')
                 . ($row->storage_zone_id ? ' &nbsp; Storage zone <code>' . $e($row->storage_zone_name) . '</code> (' . $e($row->storage_region) . ')' : '')
                 . ' &nbsp; CDN host <code>' . $e($row->cdn_url) . '</code>',
-            'Origin' => '<code>' . $e($row->origin_url) . '</code>',
+            'Origin' => '<code>' . $e($row->origin_url) . '</code>'
+                . ($row->storage_zone_id && CDN::decodeList($row->storage_replicas ?? '') ? ' &nbsp; Replicas: ' . $e(implode(', ', CDN::decodeList($row->storage_replicas))) : '')
+                . (CDN::dnssecInfo($row) ? ' &nbsp; <span class="label label-info">DNSSEC on</span>' : ''),
         ];
         if (!$cname) {
             $fields['Nameservers'] = $e($row->nameserver_1) . ', ' . $e($row->nameserver_2);
@@ -368,6 +376,30 @@ function seekahostcdn_AdminServicesTabFieldsSave(array $params)
 
 // ====================================================================== Client
 
+/**
+ * Stream a download to the browser. $run($onStart, $onChunk) calls $onStart once the
+ * data is known to exist; errors before that are still reported as JSON.
+ */
+function seekahostcdn_download($filename, callable $run)
+{
+    $filename = preg_replace('/[^A-Za-z0-9._-]+/', '_', $filename) ?: 'download';
+    $onStart = function () use ($filename) {
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        // Always a download, never rendered in the client area (uploaded HTML must not run here)
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: no-store');
+    };
+    $run($onStart, function ($data) {
+        echo $data;
+        flush();
+    });
+    exit;
+}
+
 function seekahostcdn_json(array $data)
 {
     while (ob_get_level() > 0) {
@@ -425,7 +457,7 @@ function seekahostcdn_clientStats($row, BunnyClient $bunny, array $ctx, $range)
             $from = date('Y-m-01');
             $to = $today;
     }
-    $stats = $bunny->getStatistics($row->pull_zone_id, $from, $to);
+    $stats = $bunny->getStatistics($row->pull_zone_id, $from, $to, false, true);
     $bytes = (int) ($stats['TotalBandwidthUsed'] ?? 0);
     $currency = CDN::clientCurrency($ctx['userid']);
 
@@ -463,6 +495,7 @@ function seekahostcdn_clientStats($row, BunnyClient $bunny, array $ctx, $range)
         'limit' => $limit > 0 ? CDN::formatBytes($limit) : 'Unlimited',
         'limitPercent' => $limit > 0 ? min(100, round($monthBytes / $limit * 100, 1)) : null,
         'chart' => $chart,
+        'extras' => CDN::statsExtras($stats),
     ];
 }
 
@@ -473,14 +506,14 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
     }
 
     $action = (string) $_POST['shcdn_action'];
-    $readOnly = in_array($action, ['records', 'stats', 'settings'], true);
+    $readOnly = in_array($action, ['records', 'stats', 'settings', 'zone_export', 'logs_download', 'files_list', 'files_download'], true);
     if (!$readOnly && !$ctx['active']) {
         seekahostcdn_json(['success' => false, 'error' => 'This service is not active.']);
     }
 
     // Throttle actions that are expensive for this server or bunny.net
     $cooldowns = ['import' => 60, 'purge' => 10, 'purge_urls' => 5, 'ssl' => 20, 'storage_reset' => 60, 'settings_save' => 3,
-        'token_reset' => 60, 'cert_upload' => 10];
+        'token_reset' => 60, 'cert_upload' => 10, 'dnssec_enable' => 10, 'dnssec_disable' => 10, 'zone_import' => 30, 'logs_download' => 5];
     if (isset($cooldowns[$action])) {
         $key = 'shcdn_throttle_' . (int) $row->service_id . '_' . $action;
         $wait = (int) ($_SESSION[$key] ?? 0) + $cooldowns[$action] - time();
@@ -489,7 +522,7 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
         }
         $_SESSION[$key] = time();
     }
-    $dnsAction = in_array($action, ['records', 'add', 'update', 'delete', 'import'], true);
+    $dnsAction = in_array($action, ['records', 'add', 'update', 'delete', 'import', 'dnssec_enable', 'dnssec_disable', 'zone_export', 'zone_import'], true);
     if ($dnsAction && ($row->mode ?? 'dns') !== 'dns') {
         seekahostcdn_json(['success' => false, 'error' => 'DNS for this domain is managed at your own DNS provider.']);
     }
@@ -586,6 +619,78 @@ function seekahostcdn_handleClientAjax($row, array $ctx)
                 }
                 $bunny->resetStoragePassword($row->storage_zone_id);
                 seekahostcdn_json(['success' => true, 'message' => 'A new storage password has been generated.', 'storage' => CDN::storageDetails($row, $bunny)]);
+
+            case 'dnssec_enable':
+                seekahostcdn_json(['success' => true, 'message' => 'DNSSEC is on. Add the DS record below at your domain registrar to complete it.',
+                    'dnssec' => CDN::enableDnssec($row, $bunny)]);
+
+            case 'dnssec_disable':
+                CDN::disableDnssec($row, $bunny);
+                seekahostcdn_json(['success' => true, 'message' => 'DNSSEC is off. Remove the DS record at your registrar first, or the domain may stop resolving.', 'dnssec' => null]);
+
+            case 'zone_export':
+                seekahostcdn_json(['success' => true, 'filename' => $row->domain . '.zone', 'text' => CDN::exportZone($row, $bunny)]);
+
+            case 'zone_import':
+                $res = CDN::importZone($row, $bunny, (string) ($_POST['zone'] ?? ''));
+                seekahostcdn_json([
+                    'success' => true,
+                    'message' => $res['added'] . ' record(s) added, ' . $res['skipped'] . ' skipped (SOA, NS or other types)'
+                        . ($res['failed'] ? ', ' . count($res['failed']) . ' with errors: ' . implode('; ', array_slice($res['failed'], 0, 5)) : '') . '.',
+                    'records' => CDN::presentRecords($bunny->getDnsRecords($row->dns_zone_id)),
+                ]);
+
+            case 'logs_download':
+                $date = (string) ($_POST['date'] ?? '');
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > date('Y-m-d') || $date < date('Y-m-d', strtotime('-3 days'))) {
+                    throw new InvalidArgumentException('Logs are kept for the last 3 days only.');
+                }
+                if (empty($bunny->getPullZone($row->pull_zone_id)['EnableLogging'])) {
+                    throw new InvalidArgumentException('Access logs are off. Turn them on in CDN settings; logging starts from then.');
+                }
+                try {
+                    seekahostcdn_download($row->domain . '-' . $date . '.log', function ($start, $chunk) use ($bunny, $row, $date) {
+                        $bunny->streamLog($row->pull_zone_id, $date, $start, $chunk);
+                    });
+                } catch (SeekahostCDN\BunnyException $e) {
+                    throw new InvalidArgumentException($e->httpCode === 404 ? 'There is no log for that day yet.' : $e->getMessage());
+                }
+
+            case 'files_list':
+                seekahostcdn_json(['success' => true] + CDN::listFiles($row, $bunny, (string) ($_POST['path'] ?? '')));
+
+            case 'files_upload':
+                $folder = CDN::storagePath((string) ($_POST['path'] ?? ''));
+                $file = $_FILES['file'] ?? null;
+                if (!$file || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name'])) {
+                    $tooBig = in_array($file['error'] ?? 0, [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true);
+                    throw new InvalidArgumentException($tooBig ? 'The file is larger than this server accepts (' . CDN::formatBytes(CDN::maxUploadBytes()) . '). Use FTP for large files.' : 'The upload failed. Please try again.');
+                }
+                $target = CDN::storagePath($folder . '/' . basename((string) $file['name']));
+                CDN::storageClient($row, $bunny)->upload($target, $file['tmp_name']);
+                seekahostcdn_json(['success' => true, 'message' => basename($target) . ' uploaded.'] + CDN::listFiles($row, $bunny, $folder));
+
+            case 'files_delete':
+                $path = CDN::storagePath((string) ($_POST['path'] ?? ''));
+                if ($path === '') {
+                    throw new InvalidArgumentException('Choose a file or folder.');
+                }
+                CDN::storageClient($row, $bunny)->delete($path, !empty($_POST['dir']));
+                seekahostcdn_json(['success' => true, 'message' => basename($path) . ' deleted.'] + CDN::listFiles($row, $bunny, dirname($path) === '.' ? '' : dirname($path)));
+
+            case 'files_download':
+                $path = CDN::storagePath((string) ($_POST['path'] ?? ''));
+                if ($path === '') {
+                    throw new InvalidArgumentException('Choose a file.');
+                }
+                $storage = CDN::storageClient($row, $bunny);
+                try {
+                    seekahostcdn_download(basename($path), function ($start, $chunk) use ($storage, $path) {
+                        $storage->stream($path, $start, $chunk);
+                    });
+                } catch (SeekahostCDN\BunnyException $e) {
+                    throw new InvalidArgumentException($e->httpCode === 404 ? 'That file no longer exists.' : $e->getMessage());
+                }
         }
         seekahostcdn_json(['success' => false, 'error' => 'Unknown action.']);
     } catch (InvalidArgumentException $e) {
@@ -640,6 +745,10 @@ function seekahostcdn_clientVars($row, array $ctx, $serviceId)
         'active' => $ctx['active'],
         'mode' => $cname ? 'cname' : 'dns',
         'hasStorage' => !empty($row->storage_zone_id),
+        'dnssec' => CDN::dnssecInfo($row),
+        'storageName' => (string) ($row->storage_zone_name ?? ''),
+        'maxUpload' => CDN::maxUploadBytes(),
+        'maxUploadText' => CDN::formatBytes(CDN::maxUploadBytes()),
         'hostnames' => $hostnames,
         'cacheChoices' => CDN::$cacheChoices,
         'typeNames' => BunnyClient::$recordTypeNames,

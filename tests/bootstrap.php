@@ -221,6 +221,9 @@ namespace {
     require $root . '/addons/seekahostcdn/seekahostcdn.php';
     require $root . '/addons/seekahostcdn/hooks.php';
     SeekahostCDN\BunnyClient::$baseUrl = 'http://127.0.0.1:8977';
+    SeekahostCDN\BunnyClient::$logBaseUrl = 'http://127.0.0.1:8977/__logging';
+    require_once $root . '/servers/seekahostcdn/lib/StorageClient.php';
+    SeekahostCDN\StorageClient::$baseOverride = 'http://127.0.0.1:8977/__storage';
 
     /** Module params as WHMCS would pass them for a service. */
     function params($sid, array $extra = [])

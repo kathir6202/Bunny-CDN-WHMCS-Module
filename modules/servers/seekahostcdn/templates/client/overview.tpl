@@ -36,7 +36,7 @@
     <button type="button" class="shcdn-tab is-active" data-tab="overview">Overview</button>
     {if $shcdnMode == 'dns'}<button type="button" class="shcdn-tab" data-tab="dns">DNS records</button>{/if}
     <button type="button" class="shcdn-tab" data-tab="settings">CDN settings</button>
-    <button type="button" class="shcdn-tab" data-tab="cache">Cache</button>
+    <button type="button" class="shcdn-tab" data-tab="cache">Cache &amp; logs</button>
     {if $shcdnHasStorage}<button type="button" class="shcdn-tab" data-tab="storage">Storage</button>{/if}
 </div>
 
@@ -137,6 +137,18 @@
         <div id="shcdn-chart" class="shcdn-chart"></div>
         <div class="shcdn-chart-axis"><span id="shcdn-axis-from"></span><span id="shcdn-axis-to"></span></div>
     </div>
+    <div class="shcdn-extras" id="shcdn-extras" style="display:none">
+        <div>
+            <h4>Top countries</h4>
+            <div id="shcdn-countries"></div>
+        </div>
+        <div>
+            <h4>Responses</h4>
+            <div class="shcdn-codes" id="shcdn-codes"></div>
+            <h4>Origin</h4>
+            <div class="shcdn-muted" id="shcdn-origin-stats"></div>
+        </div>
+    </div>
     <p class="shcdn-muted shcdn-small">
         {if $shcdnBillable}{$shcdnPricePerGb|escape:'html'} per GB &middot; {/if}Limit {$shcdnLimit|escape:'html'} per month{if $shcdnBillable} &middot;
         Bandwidth is invoiced at the start of each month for the previous month.{else} &middot; Included with your hosting.{/if}
@@ -212,6 +224,29 @@
             <thead><tr><th style="width:90px">Type</th><th>Name</th><th>Value</th><th style="width:90px">TTL</th><th style="width:150px"></th></tr></thead>
             <tbody id="shcdn-records"></tbody>
         </table>
+    </div>
+</div>
+
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>DNSSEC</h3><span class="shcdn-pill shcdn-pill-grey" id="shcdn-dnssec-state">Off</span></div>
+    <p class="shcdn-muted">Signs your DNS so visitors' resolvers can verify the answers are genuine. After turning it on, add the DS record below at your domain registrar.</p>
+    <div class="shcdn-kv" id="shcdn-dnssec-ds" style="display:none"></div>
+    {if !$shcdnSuspended}
+    <div class="shcdn-actions" style="margin-top:12px">
+        <button type="button" class="shcdn-btn shcdn-btn-primary" id="shcdn-dnssec-on">Turn on DNSSEC</button>
+        <button type="button" class="shcdn-btn shcdn-btn-danger" id="shcdn-dnssec-off" style="display:none">Turn off DNSSEC</button>
+    </div>
+    {/if}
+</div>
+
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>Zone file</h3></div>
+    <p class="shcdn-muted">Download your records as a standard BIND zone file, or import one from another provider. A, AAAA, CNAME, TXT, MX, SRV and CAA records are imported; existing records are kept.</p>
+    <div class="shcdn-actions">
+        <button type="button" class="shcdn-btn" id="shcdn-zone-export">Export zone file</button>
+        {if !$shcdnSuspended}
+        <label class="shcdn-btn" style="margin:0">Import zone file<input type="file" id="shcdn-zone-file" accept=".zone,.txt,.db,text/plain" style="display:none"></label>
+        {/if}
     </div>
 </div>
 </div>
@@ -297,6 +332,15 @@
                     {if !$shcdnSuspended}<button type="button" class="shcdn-btn shcdn-btn-sm" id="shcdn-token-reset">New key</button>{/if}</div>
             </div>
 
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Access logs</strong><span>Keep raw request logs for 3 days (download them in the "Cache &amp; logs" tab).</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="logging" value="1"><span></span></label>
+            </div>
+            <div class="shcdn-set">
+                <div class="shcdn-set-text"><strong>Anonymise visitor IPs in logs</strong><span>Recommended for privacy (GDPR).</span></div>
+                <label class="shcdn-switch"><input type="checkbox" name="logAnonymize" value="1"><span></span></label>
+            </div>
+
             <h4 class="shcdn-set-group">Performance</h4>
             <div class="shcdn-set">
                 <div class="shcdn-set-text"><strong>Origin Shield</strong><span>An extra cache layer in front of your server, so it receives far fewer requests.</span></div>
@@ -370,6 +414,12 @@
     </div>
     {/if}
 </div>
+
+<div class="shcdn-card">
+    <div class="shcdn-card-head"><h3>Access logs</h3></div>
+    <p class="shcdn-muted">Download the raw CDN access log for one day (kept for 3 days). Turn on "Access logs" in CDN settings first.</p>
+    <div class="shcdn-actions" id="shcdn-log-days"></div>
+</div>
 </div>
 
 {* ----------------------------------------------------------------- Storage *}
@@ -385,6 +435,26 @@
         <button type="button" class="shcdn-btn" id="shcdn-storage-reset">Generate new password</button>
     </div>
     {/if}
+</div>
+
+<div class="shcdn-card">
+    <div class="shcdn-card-head">
+        <h3>Files</h3>
+        {if !$shcdnSuspended}
+        <div class="shcdn-actions">
+            <button type="button" class="shcdn-btn" id="shcdn-fm-newdir">New folder</button>
+            <label class="shcdn-btn shcdn-btn-primary" style="margin:0">Upload files<input type="file" id="shcdn-fm-upload" multiple style="display:none"></label>
+        </div>
+        {/if}
+    </div>
+    <div class="shcdn-crumbs" id="shcdn-fm-crumbs"></div>
+    <div class="shcdn-table-wrap">
+        <table class="shcdn-table">
+            <thead><tr><th>Name</th><th style="width:110px">Size</th><th style="width:150px">Modified</th><th style="width:230px"></th></tr></thead>
+            <tbody id="shcdn-fm-list"><tr><td colspan="4" class="shcdn-empty">Loading...</td></tr></tbody>
+        </table>
+    </div>
+    <p class="shcdn-muted shcdn-small" id="shcdn-fm-note"></p>
 </div>
 </div>
 {/if}
@@ -507,6 +577,18 @@
 #shcdn .shcdn-switch input:checked + span { background:var(--c-primary); }
 #shcdn .shcdn-switch input:checked + span::before { transform:translateX(20px); }
 #shcdn .shcdn-switch input:disabled + span { opacity:.5; cursor:default; }
+#shcdn .shcdn-extras { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-top:18px; }
+#shcdn .shcdn-extras h4 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--c-muted); margin:0 0 8px; }
+#shcdn .shcdn-country { display:grid; grid-template-columns:1fr auto; gap:2px 12px; margin-bottom:8px; font-size:13px; }
+#shcdn .shcdn-country .shcdn-bar { grid-column:1 / -1; height:6px; }
+#shcdn .shcdn-codes { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
+#shcdn .shcdn-code { border:1px solid var(--c-border); border-radius:8px; padding:8px 10px; }
+#shcdn .shcdn-code strong { display:block; font-size:16px; }
+#shcdn .shcdn-code span { font-size:12px; color:var(--c-muted); }
+#shcdn .shcdn-code-4xx strong { color:var(--c-amber); }
+#shcdn .shcdn-code-5xx strong { color:var(--c-red); }
+#shcdn .shcdn-crumbs { margin-bottom:10px; font-size:14px; }
+#shcdn .shcdn-crumbs a { font-weight:500; }
 #shcdn .shcdn-set-group { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--c-muted); margin:22px 0 4px; font-weight:600; }
 #shcdn .shcdn-kv { border:1px solid var(--c-border); border-radius:10px; overflow:hidden; }
 #shcdn .shcdn-kv-row { display:flex; gap:12px; padding:10px 14px; border-bottom:1px solid #f3f4f6; align-items:center; }
@@ -515,6 +597,7 @@
 #shcdn .shcdn-kv-val { flex:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap; word-break:break-all; }
 
 @media (max-width: 767px) {
+    #shcdn .shcdn-extras { grid-template-columns:1fr; }
     #shcdn .shcdn-set { flex-direction:column; align-items:stretch; gap:8px; }
     #shcdn .shcdn-set > .form-control { flex:1 1 auto; }
     #shcdn .shcdn-kv-row { flex-direction:column; align-items:flex-start; gap:4px; }
@@ -751,7 +834,7 @@
         root.querySelectorAll('.shcdn-tab').forEach(function (t) { t.classList.toggle('is-active', t.getAttribute('data-tab') === name); });
         root.querySelectorAll('.shcdn-pane').forEach(function (p) { p.hidden = p.getAttribute('data-pane') !== name; });
         if (name === 'settings' && !loaded.settings) { loaded.settings = true; loadSettings(); }
-        if (name === 'storage' && !loaded.storage) { loaded.storage = true; loadStorage(); }
+        if (name === 'storage' && !loaded.storage) { loaded.storage = true; loadStorage(); fmLoad(''); }
         try { sessionStorage.setItem('shcdn-tab-' + cfg.serviceId, name); } catch (e) {}
     }
     root.querySelectorAll('.shcdn-tab').forEach(function (t) {
@@ -776,7 +859,7 @@
         setForm.allowedReferrers.value = st.allowedReferrers;
         setForm.blockNoneReferrer.checked = !!st.blockNoneReferrer;
         setForm.blockedIps.value = st.blockedIps;
-        ['originShield', 'staleUpdating', 'staleOffline', 'webpVary', 'countryVary', 'cors', 'tokenAuth', 'tokenIp'].forEach(function (n) {
+        ['originShield', 'staleUpdating', 'staleOffline', 'webpVary', 'countryVary', 'cors', 'tokenAuth', 'tokenIp', 'logging', 'logAnonymize'].forEach(function (n) {
             setForm[n].checked = !!st[n];
         });
         ['cookieVary', 'corsExtensions', 'connectionLimit', 'requestLimit', 'speedLimit'].forEach(function (n) {
@@ -846,6 +929,207 @@
             if (res.success) { certForm.certificate.value = ''; certForm.private_key.value = ''; }
         });
     });
+
+    // ------------------------------------------------------------ downloads
+    function download(action, data) {
+        var body = new URLSearchParams(data || {});
+        body.append('shcdn_action', action);
+        body.append('token', cfg.token);
+        return fetch(cfg.endpoint, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+            body: body.toString()
+        }).then(function (r) {
+            if ((r.headers.get('Content-Type') || '').indexOf('application/json') >= 0) {
+                return r.json().then(function (j) { notify('error', j.error || 'Download failed.'); });
+            }
+            var m = (r.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/);
+            return r.blob().then(function (b) { saveBlob(b, m ? m[1] : 'download'); });
+        }).catch(function () { notify('error', 'Network error. Please try again.'); });
+    }
+    function saveBlob(blob, name) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }
+
+    // ------------------------------------------------------- detailed stats
+    function renderExtras(x) {
+        if (!x) return;
+        $('shcdn-extras').style.display = '';
+        $('shcdn-countries').innerHTML = x.countries.length ? x.countries.map(function (c) {
+            return '<div class="shcdn-country"><span>' + esc(c.name || c.code) + '</span><span class="shcdn-muted">' + esc(c.bandwidth) + '</span>' +
+                '<div class="shcdn-bar"><div style="width:' + c.percent + '%"></div></div></div>';
+        }).join('') : '<span class="shcdn-muted">No traffic yet.</span>';
+        var labels = { '2xx': 'Success', '3xx': 'Redirects', '4xx': 'Client errors', '5xx': 'Server errors' };
+        $('shcdn-codes').innerHTML = Object.keys(labels).map(function (k) {
+            return '<div class="shcdn-code shcdn-code-' + k + '"><strong>' + Number(x.responses[k] || 0).toLocaleString() + '</strong><span>' + k + ' ' + labels[k] + '</span></div>';
+        }).join('');
+        $('shcdn-origin-stats').textContent = 'Fetched from your server: ' + x.originTraffic + ' · average response time ' + x.originResponseMs + ' ms';
+    }
+
+    // ----------------------------------------------------------------- logs
+    (function () {
+        var box = $('shcdn-log-days');
+        var days = [0, 1, 2].map(function (i) {
+            var d = new Date(); d.setDate(d.getDate() - i);
+            return d.toISOString().slice(0, 10);
+        });
+        box.innerHTML = days.map(function (d, i) {
+            return '<button type="button" class="shcdn-btn" data-log="' + d + '">' + (i === 0 ? 'Today' : i === 1 ? 'Yesterday' : fmtDate(d)) + '</button>';
+        }).join('');
+        box.addEventListener('click', function (e) {
+            var b = e.target.closest('[data-log]');
+            if (!b) return;
+            busy(b, true, 'Preparing...');
+            download('logs_download', { date: b.getAttribute('data-log') }).then(function () { busy(b, false); });
+        });
+    })();
+
+    // --------------------------------------------------------------- DNSSEC
+    function renderDnssec(ds) {
+        if (!$('shcdn-dnssec-state')) return;
+        cfg.dnssec = ds;
+        var on = !!ds;
+        $('shcdn-dnssec-state').textContent = on ? 'On' : 'Off';
+        $('shcdn-dnssec-state').className = 'shcdn-pill ' + (on ? 'shcdn-pill-green' : 'shcdn-pill-grey');
+        if ($('shcdn-dnssec-on')) { $('shcdn-dnssec-on').style.display = on ? 'none' : ''; $('shcdn-dnssec-off').style.display = on ? '' : 'none'; }
+        var rows = on ? [['DS record', ds.DsRecord], ['Key tag', ds.KeyTag], ['Algorithm', ds.Algorithm], ['Digest type', ds.DigestType], ['Digest', ds.Digest], ['Public key', ds.PublicKey], ['Flags', ds.Flags]]
+            .filter(function (r) { return r[1]; }) : [];
+        $('shcdn-dnssec-ds').style.display = rows.length ? '' : 'none';
+        $('shcdn-dnssec-ds').innerHTML = rows.map(function (r) {
+            return '<div class="shcdn-kv-row"><span class="shcdn-kv-key">' + esc(r[0]) + '</span><span class="shcdn-kv-val"><span class="shcdn-mono">' + esc(r[1]) +
+                '</span> <button type="button" class="shcdn-btn shcdn-btn-sm" data-copy-value="' + esc(r[1]) + '">Copy</button></span></div>';
+        }).join('');
+    }
+    if ($('shcdn-dnssec-ds')) {
+        renderDnssec(cfg.dnssec);
+        $('shcdn-dnssec-ds').addEventListener('click', function (e) {
+            var cp = e.target.closest('[data-copy-value]');
+            if (!cp) return;
+            if (navigator.clipboard) navigator.clipboard.writeText(cp.getAttribute('data-copy-value'));
+            cp.textContent = 'Copied';
+            setTimeout(function () { cp.textContent = 'Copy'; }, 1500);
+        });
+    }
+    [['shcdn-dnssec-on', 'dnssec_enable', null], ['shcdn-dnssec-off', 'dnssec_disable', 'Turn off DNSSEC? Remove the DS record at your registrar FIRST, otherwise your domain may stop resolving.']].forEach(function (a) {
+        var btn = $(a[0]);
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            if (a[2] && !confirm(a[2])) return;
+            busy(btn, true);
+            call(a[1]).then(function (res) {
+                busy(btn, false);
+                notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'Request failed.'));
+                if (res.success) renderDnssec(res.dnssec);
+            });
+        });
+    });
+
+    // ------------------------------------------------------------ zone file
+    if ($('shcdn-zone-export')) $('shcdn-zone-export').addEventListener('click', function () {
+        call('zone_export').then(function (res) {
+            if (res.success) saveBlob(new Blob([res.text], { type: 'text/plain' }), res.filename);
+            else notify('error', res.error || 'Export failed.');
+        });
+    });
+    if ($('shcdn-zone-file')) $('shcdn-zone-file').addEventListener('change', function () {
+        var f = this.files[0];
+        var input = this;
+        if (!f) return;
+        if (f.size > 262144) { notify('error', 'The zone file is too large (maximum 256 KB).'); input.value = ''; return; }
+        f.text().then(function (text) {
+            call('zone_import', { zone: text }).then(function (res) {
+                input.value = '';
+                notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'Import failed.'));
+                if (res.records) renderRecords(res.records);
+            });
+        });
+    });
+
+    // --------------------------------------------------------- file manager
+    var fm = { path: '' };
+    function fmRender(res) {
+        fm.path = res.path;
+        var parts = res.path ? res.path.split('/') : [];
+        var crumbs = ['<a href="#" data-dir="">' + esc(cfg.storageName || 'Storage') + '</a>'];
+        parts.forEach(function (p, i) { crumbs.push('<a href="#" data-dir="' + esc(parts.slice(0, i + 1).join('/')) + '">' + esc(p) + '</a>'); });
+        $('shcdn-fm-crumbs').innerHTML = crumbs.join(' <span class="shcdn-muted">/</span> ');
+        $('shcdn-fm-list').innerHTML = res.items.length ? res.items.map(function (it) {
+            var actions = it.dir ? '' :
+                '<button type="button" class="shcdn-btn shcdn-btn-sm" data-dl="' + esc(it.path) + '">Download</button>' +
+                '<button type="button" class="shcdn-btn shcdn-btn-sm" data-url="' + esc(it.url) + '">Copy URL</button>';
+            if (cfg.active) actions += '<button type="button" class="shcdn-btn shcdn-btn-sm shcdn-btn-danger" data-rm="' + esc(it.path) + '" data-isdir="' + (it.dir ? 1 : 0) + '">Delete</button>';
+            return '<tr><td>' + (it.dir ? '<a href="#" data-dir="' + esc(it.path) + '">&#128193; ' + esc(it.name) + '</a>' : esc(it.name)) + '</td>' +
+                '<td>' + esc(it.size) + '</td><td>' + esc(it.modified) + '</td><td><div class="shcdn-row-actions">' + actions + '</div></td></tr>';
+        }).join('') : '<tr><td colspan="4" class="shcdn-empty">This folder is empty.</td></tr>';
+    }
+    function fmLoad(path) {
+        call('files_list', { path: path }).then(function (res) {
+            if (res.success) fmRender(res);
+            else $('shcdn-fm-list').innerHTML = '<tr><td colspan="4" class="shcdn-empty">' + esc(res.error || 'Files could not be loaded.') + '</td></tr>';
+        });
+    }
+    if ($('shcdn-fm-list')) {
+        $('shcdn-fm-note').textContent = 'Maximum upload size here: ' + cfg.maxUploadText + '. Use FTP for larger files.';
+        var fmRoot = $('shcdn-fm-list').closest('.shcdn-card');
+        fmRoot.addEventListener('click', function (e) {
+            var dir = e.target.closest('[data-dir]');
+            var dl = e.target.closest('[data-dl]');
+            var url = e.target.closest('[data-url]');
+            var rm = e.target.closest('[data-rm]');
+            if (dir) { e.preventDefault(); fmLoad(dir.getAttribute('data-dir')); }
+            if (dl) { busy(dl, true, '...'); download('files_download', { path: dl.getAttribute('data-dl') }).then(function () { busy(dl, false); }); }
+            if (url) {
+                if (navigator.clipboard) navigator.clipboard.writeText(url.getAttribute('data-url'));
+                url.textContent = 'Copied';
+                setTimeout(function () { url.textContent = 'Copy URL'; }, 1500);
+            }
+            if (rm) {
+                var isDir = rm.getAttribute('data-isdir') === '1';
+                if (!confirm(isDir ? 'Delete this folder and everything in it?' : 'Delete this file?')) return;
+                busy(rm, true, '...');
+                call('files_delete', { path: rm.getAttribute('data-rm'), dir: isDir ? 1 : '' }).then(function (res) {
+                    notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'Delete failed.'));
+                    if (res.success) fmRender(res); else busy(rm, false);
+                });
+            }
+        });
+        if ($('shcdn-fm-newdir')) $('shcdn-fm-newdir').addEventListener('click', function () {
+            var name = prompt('Folder name');
+            if (!name) return;
+            if (/[\/\\:*?"<>|]/.test(name) || name === '.' || name === '..') { notify('error', 'That is not a valid folder name.'); return; }
+            fmRender({ path: (fm.path ? fm.path + '/' : '') + name, items: [] });
+            notify('success', 'Folder ready: upload files into it to create it.');
+        });
+        if ($('shcdn-fm-upload')) $('shcdn-fm-upload').addEventListener('change', function () {
+            var input = this;
+            var files = Array.prototype.slice.call(input.files);
+            var next = function () {
+                var f = files.shift();
+                if (!f) { input.value = ''; return; }
+                if (f.size > cfg.maxUpload) { notify('error', f.name + ' is larger than ' + cfg.maxUploadText + '. Use FTP for large files.'); return next(); }
+                var fd = new FormData();
+                fd.append('shcdn_action', 'files_upload');
+                fd.append('token', cfg.token);
+                fd.append('path', fm.path);
+                fd.append('file', f, f.name);
+                notify('success', 'Uploading ' + f.name + '...');
+                fetch(cfg.endpoint, { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        notify(res.success ? 'success' : 'error', res.success ? res.message : (res.error || 'Upload failed.'));
+                        if (res.success) fmRender(res);
+                        next();
+                    })
+                    .catch(function () { notify('error', 'Upload of ' + f.name + ' failed.'); next(); });
+            };
+            next();
+        });
+    }
 
     // ------------------------------------------------------------- purging
     if ($('shcdn-purge-urls-btn')) $('shcdn-purge-urls-btn').addEventListener('click', function () {
@@ -943,6 +1227,7 @@
             }).join('') : '<span class="shcdn-chart-empty">No traffic in this period yet.</span>';
             $('shcdn-axis-from').textContent = fmtDate(s.from);
             $('shcdn-axis-to').textContent = fmtDate(s.to);
+            renderExtras(s.extras);
         });
     }
     $('shcdn-range').addEventListener('change', loadStats);

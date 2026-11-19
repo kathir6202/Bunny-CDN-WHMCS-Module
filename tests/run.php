@@ -46,6 +46,10 @@ function ajaxRaw($sid, $query)
 {
     return json_decode((string) shell_exec('php ' . escapeshellarg(__DIR__ . '/cli.php') . ' ajax ' . (int) $sid . ' ' . escapeshellarg($query) . ' 2>&1'), true);
 }
+function rawAjax($sid, $query)
+{
+    return (string) shell_exec('php ' . escapeshellarg(__DIR__ . '/cli.php') . ' ajax ' . (int) $sid . ' ' . escapeshellarg($query . '&token=tok123') . ' 2>&1');
+}
 function render($sid)
 {
     return (string) shell_exec('php ' . escapeshellarg(__DIR__ . '/cli.php') . ' render ' . (int) $sid . ' 2>&1');
@@ -96,7 +100,7 @@ seekahostcdn_activate();
 ok(DB::table('tblemailtemplates')->count() === 2, 're-activating does not duplicate templates');
 ok(seekahostcdn_TestConnection(params(1))['success'] === true, 'Test Connection succeeds with valid key');
 ok(seekahostcdn_TestConnection(params(1, ['serveraccesshash' => 'wrong']))['success'] === false, 'Test Connection fails with wrong key');
-ok(count(seekahostcdn_ConfigOptions()) === 6, 'product has 6 module settings');
+ok(count(seekahostcdn_ConfigOptions()) === 7, 'product has 7 module settings');
 
 // ============================================================== Provisioning
 section('Provisioning: nameserver mode (example.com)');
@@ -323,6 +327,96 @@ ok(ajax(2, $q('www.shop-test.co.uk', $wildCert, $wildKey))['success'], 'wildcard
 $log = (string) @file_get_contents(SHT_TMP . '/modulecall.log');
 ok(strpos($log, 'PRIVATE KEY') === false && strpos($log, base64_encode($key)) === false && strpos($log, substr(base64_encode($key), 40, 40)) === false, 'private key never written to the module log');
 
+section('Detailed statistics');
+$x = ajax(1, 'shcdn_action=stats')['extras'] ?? [];
+ok(($x['countries'][0]['code'] ?? '') === 'US' && ($x['countries'][0]['name'] ?? '') === 'United States' && abs($x['countries'][0]['percent'] - 48) < 0.1, 'top countries with names and share', $x['countries'] ?? null);
+ok(($x['responses']['4xx'] ?? 0) === 456 && $x['responses']['5xx'] === 7 && $x['responses']['3xx'] === 100 && $x['responses']['2xx'] === 123456 - 563, 'response code totals (2xx/3xx/4xx/5xx)');
+ok(($x['originResponseMs'] ?? 0) === 42 && $x['originTraffic'] === '1.2 GB', 'origin traffic and response time');
+
+section('Access logs');
+$base1 = 'shcdn_action=settings_save&origin=93.184.215.14&cacheTime=-1&browserCacheTime=-1';
+ok(strpos(ajax(1, 'shcdn_action=logs_download&date=' . date('Y-m-d'))['error'] ?? '', 'Access logs are off') !== false, 'download explains that logs must be turned on');
+$res = ajax(1, $base1 . '&logging=1&logAnonymize=1');
+ok($res['success'] && fake()['pz'][$z1->pull_zone_id]['EnableLogging'] === true && fake()['pz'][$z1->pull_zone_id]['LoggingIPAnonymizationEnabled'] === true, 'access logs and IP anonymisation turned on');
+$log = rawAjax(1, 'shcdn_action=logs_download&date=' . date('Y-m-d'));
+ok(strpos($log, 'HIT|200') !== false && strpos($log, 'MISS|404') !== false, "today's log downloaded");
+ok(strpos(ajax(1, 'shcdn_action=logs_download&date=' . date('Y-m-d', strtotime('-5 days')))['error'] ?? '', '3 days') !== false, 'older than 3 days refused');
+ok(!ajax(1, 'shcdn_action=logs_download&date=' . urlencode('../../etc'))['success'], 'invalid date refused');
+ajax(1, $base1);
+
+section('DNSSEC');
+$res = ajax(1, 'shcdn_action=dnssec_enable');
+ok($res['success'] && ($res['dnssec']['DsRecord'] ?? '') === '12345 13 2 ABCDEF0123456789', 'DNSSEC enabled, DS record returned', $res);
+ok(CDN::dnssecInfo(row(1))['KeyTag'] === '12345' && strpos(render(1), 'ABCDEF0123456789') !== false, 'DS record kept and shown on the page');
+ok(ajax(1, 'shcdn_action=dnssec_disable')['success'] && CDN::dnssecInfo(row(1)) === null, 'DNSSEC disabled');
+ok(!ajax(2, 'shcdn_action=dnssec_enable')['success'], 'DNSSEC not offered in CNAME mode');
+
+section('Zone file export / import');
+$res = ajax(1, 'shcdn_action=zone_export');
+$zone = $res['text'] ?? '';
+ok($res['success'] && $res['filename'] === 'example.com.zone' && strpos($zone, '$ORIGIN example.com.') === 0 + strpos($zone, '$ORIGIN example.com.'), 'zone file exported');
+ok(preg_match('/^@\s+\d+\s+IN\s+MX\t10 mail\.example\.com\.$/m', $zone) && preg_match('/IN\s+TXT\t"v=spf1 -all"/', $zone), 'MX and TXT in BIND format');
+ok(preg_match('/^; @ CDN .*managed by the CDN/m', $zone) === 1, 'CDN records listed as comments');
+$import = implode("\n", [
+    '$ORIGIN example.com.', '$TTL 600',
+    '@   IN SOA ns1.x. admin.x. ( 1 7200 3600 1209600', '      3600 ) ; serial etc',
+    '@   IN NS ns1.other.net.',
+    'imported IN A 192.0.2.50',
+    'alias 300 IN CNAME target.example.net.',
+    'rel  IN CNAME imported',
+    'mx2  IN MX 5 mail2',
+    '     IN TXT "mx2 \\"quoted\\" text" ; second record for mx2',
+    '@    IN TXT "part one " "part two"',
+    '_svc._tcp IN SRV 1 2 443 sip.example.net.',
+    'bad  IN A 999.1.1.1',
+    'other.org. IN A 192.0.2.9',
+]);
+$res = ajax(1, 'shcdn_action=zone_import&zone=' . urlencode($import));
+$recs = recordsOf($z1->dns_zone_id);
+ok($res['success'] && hasRecord($recs, 0, 'imported', '192.0.2.50') && hasRecord($recs, 2, 'alias', 'target.example.net'), 'A and absolute CNAME imported', $res);
+$alias = array_values(array_filter($recs, function ($r) { return $r['Name'] === 'alias'; }));
+ok(($alias[0]['Ttl'] ?? 0) === 300, 'per-record TTL kept');
+ok(hasRecord($recs, 2, 'rel', 'imported.example.com') && hasRecord($recs, 4, 'mx2', 'mail2.example.com'), 'relative names expanded with $ORIGIN');
+ok(hasRecord($recs, 3, 'mx2', 'mx2 "quoted" text'), 'owner carried over to the next line; escaped quotes kept');
+ok(hasRecord($recs, 3, '', 'part one part two'), 'multi-part TXT joined');
+ok(hasRecord($recs, 8, '_svc._tcp', 'sip.example.net'), 'SRV imported');
+ok(strpos($res['message'], 'Line') !== false && !hasRecord($recs, 0, 'bad'), 'invalid record reported with its line number, not added');
+ok(!hasRecord($recs, 0, 'other.org') && preg_match('/(\d+) skipped/', $res['message'], $m) && (int) $m[1] >= 3, 'SOA, NS and out-of-zone records skipped');
+$res = ajax(1, 'shcdn_action=zone_import&zone=' . urlencode(ajax(1, 'shcdn_action=zone_export')['text']));
+ok($res['success'] && strpos($res['message'], '0 record(s) added') === 0, 're-importing our own export adds nothing (round trip)');
+file_put_contents(SHT_TMP . '/big.zone', 'shcdn_action=zone_import&token=tok123&zone=' . str_repeat('a', 300000));
+$big = json_decode((string) shell_exec("curl -s --data-binary @" . escapeshellarg(SHT_TMP . '/big.zone') . " 'http://127.0.0.1:8978/clientarea.php?id=1'"), true);
+ok(strpos($big['error'] ?? '', 'too large') !== false, 'oversized zone file refused', $big);
+
+section('Storage file manager');
+$up = function ($sid, $path, $file, $name) {
+    return json_decode((string) shell_exec('curl -s -F shcdn_action=files_upload -F token=tok123 --form-string ' . escapeshellarg('path=' . $path)
+        . ' -F ' . escapeshellarg('file=@' . $file . ';filename=' . $name) . ' ' . escapeshellarg('http://127.0.0.1:8978/clientarea.php?id=' . $sid)), true);
+};
+$res = ajax(3, 'shcdn_action=files_list&path=');
+ok($res['success'] && $res['items'] === [], 'empty storage listed');
+file_put_contents(SHT_TMP . '/hello.txt', 'Hello CDN');
+file_put_contents(SHT_TMP . '/page.html', '<script>alert(1)</script>');
+$res = $up(3, 'docs', SHT_TMP . '/hello.txt', 'hello.txt');
+ok(($res['success'] ?? false) && ($res['items'][0]['name'] ?? '') === 'hello.txt' && $res['items'][0]['size'] === '9 B', 'file uploaded into a new folder', $res);
+ok(strpos($res['items'][0]['url'], 'https://static.example.org/docs/hello.txt') === 0 || strpos($res['items'][0]['url'], '.b-cdn.net/docs/hello.txt') !== false, 'public CDN URL offered');
+$res = $up(3, '', SHT_TMP . '/page.html', '../../page.html');
+ok(($res['success'] ?? false) && in_array('page.html', array_column($res['items'], 'name'), true), 'path in the uploaded file name is stripped');
+ok(!($up(3, '../etc', SHT_TMP . '/hello.txt', 'x.txt')['success'] ?? true), 'folder path with .. refused');
+$root = ajax(3, 'shcdn_action=files_list&path=');
+ok($root['items'][0]['name'] === 'docs' && $root['items'][0]['dir'] === true, 'folders listed first');
+ok(rawAjax(3, 'shcdn_action=files_download&path=docs/hello.txt') === 'Hello CDN', 'file downloaded through the module');
+$headers = (string) shell_exec("curl -s -D - -o /dev/null -d 'shcdn_action=files_download&token=tok123&path=page.html' 'http://127.0.0.1:8978/clientarea.php?id=3'");
+ok(stripos($headers, 'Content-Type: application/octet-stream') !== false && stripos($headers, 'attachment; filename="page.html"') !== false && stripos($headers, 'nosniff') !== false, 'downloads are attachments, never rendered (uploaded HTML cannot run)');
+ok(strpos(ajax(3, 'shcdn_action=files_download&path=docs/nope.txt')['error'] ?? '', 'no longer exists') !== false, 'missing file reported');
+ok(ajax(3, 'shcdn_action=files_delete&path=page.html')['success'] && !in_array('page.html', array_column(ajax(3, 'shcdn_action=files_list&path=')['items'], 'name'), true), 'file deleted');
+ok(ajax(3, 'shcdn_action=files_delete&path=docs&dir=1')['success'] && ajax(3, 'shcdn_action=files_list&path=')['items'] === [], 'folder deleted with its contents');
+ok(!ajax(1, 'shcdn_action=files_list&path=')['success'], 'file manager refused without a storage zone');
+ok(!ajax(3, 'shcdn_action=files_list&path=' . urlencode('a/../../b'))['success'], 'path traversal refused');
+$log = (string) @file_get_contents(SHT_TMP . '/modulecall.log');
+$pw = fake()['sz'][$z3->storage_zone_id]['Password'];
+ok(strpos($log, $pw) === false, 'storage password never written to the module log');
+
 // =================================================================== Lifecycle
 section('Suspend / unsuspend / upgrade');
 seekahostcdn_SuspendAccount(params(2));
@@ -400,6 +494,17 @@ DB::table('mod_seekahostcdn_dns_zones')->where('service_id', 4)->update(['create
 CDN::runMonthlyBilling($month);
 ok(DB::table('mod_seekahostcdn_billing')->where('service_id', 4)->exists(), 'included CDN billed when "Bill Included CDN Usage" is on');
 DB::table('tbladdonmodules')->where('setting', 'included_bill')->update(['value' => '']);
+
+section('Storage replication');
+seekahostcdn_ChangePackage(params(3, ['configoption7' => 'SG, NY, de, XX']));
+ok(fake()['sz'][$z3->storage_zone_id]['ReplicationRegions'] === ['SG', 'DE'] && CDN::decodeList(row(3)->storage_replicas) === ['SG', 'DE'], 'replication regions added (main region and unknown codes ignored)');
+seekahostcdn_ChangePackage(params(3, ['configoption7' => 'SG']));
+ok(CDN::decodeList(row(3)->storage_replicas) === ['SG', 'DE'], 'regions are never removed (bunny.net cannot remove them)');
+DB::table('mod_seekahostcdn_billing')->where('service_id', 3)->delete();
+clearLog('localapi.log');
+CDN::billServiceMonth(row(3), $month);
+ok((float) DB::table('mod_seekahostcdn_billing')->where('service_id', 3)->value('storage_cost') === 0.18 && logHas('localapi.log', '3.00 GB x 3 regions'), 'storage billed per copy (3 GB x 3 regions x $0.02)');
+ok(strpos(seekahostcdn_AdminServicesTabFields(params(3))['Origin'], 'Replicas: SG, DE') !== false, 'admin sees replication regions');
 
 section('Overdue usage invoices');
 $inv = DB::table('mod_seekahostcdn_billing')->pluck('invoice_id', 'service_id')->toArray();

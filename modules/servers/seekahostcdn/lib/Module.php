@@ -72,6 +72,8 @@ class Module
             'overage_month' => function ($t) { $t->string('overage_month', 7)->nullable(); },
             'unpaid_invoice_id' => function ($t) { $t->integer('unpaid_invoice_id')->nullable(); },
             'unpaid_ignored' => function ($t) { $t->text('unpaid_ignored')->nullable(); },
+            'dnssec' => function ($t) { $t->text('dnssec')->nullable(); },
+            'storage_replicas' => function ($t) { $t->text('storage_replicas')->nullable(); },
         ]);
 
         // Daily month-to-date snapshot of each zone: bandwidth and bunny.net cost
@@ -543,7 +545,7 @@ class Module
 
             $storage = null;
             if ($useStorage) {
-                $storage = self::createStorageZone($bunny, $serviceId, $domain, self::storageRegion($params));
+                $storage = self::createStorageZone($bunny, $serviceId, $domain, self::storageRegion($params), self::replicaRegions($params));
                 $createdStorage = $storage['Id'];
             }
 
@@ -599,6 +601,7 @@ class Module
                 'storage_zone_id' => $storage ? (string) $storage['Id'] : null,
                 'storage_zone_name' => $storage ? (string) $storage['Name'] : null,
                 'storage_region' => $storage ? self::storageRegion($params) : null,
+                'storage_replicas' => $storage ? json_encode(self::replicaRegions($params)) : null,
                 'created_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s'),
             ]);
@@ -645,16 +648,16 @@ class Module
         return trim('sh' . $serviceId . '-' . $slug, '-');
     }
 
-    private static function createStorageZone(BunnyClient $bunny, $serviceId, $domain, $region)
+    private static function createStorageZone(BunnyClient $bunny, $serviceId, $domain, $region, array $replicas = [])
     {
         $name = self::zoneName($serviceId, $domain, 60);
         try {
-            return $bunny->createStorageZone($name, $region);
+            return $bunny->createStorageZone($name, $region, $replicas);
         } catch (BunnyException $e) {
             if (stripos($e->getMessage(), 'taken') === false && stripos($e->getMessage(), 'exists') === false) {
                 throw $e;
             }
-            return $bunny->createStorageZone(substr($name, 0, 50) . '-' . substr(md5(uniqid('', true)), 0, 6), $region);
+            return $bunny->createStorageZone(substr($name, 0, 50) . '-' . substr(md5(uniqid('', true)), 0, 6), $region, $replicas);
         }
     }
 
@@ -1164,6 +1167,9 @@ class Module
         if (!$row->suspended) {
             self::clientForParams($params)->updatePullZone($row->pull_zone_id, ['MonthlyBandwidthLimit' => $limit]);
         }
+        if (!empty($row->storage_zone_id)) {
+            self::applyReplication($row, self::clientForParams($params), self::replicaRegions($params));
+        }
         return 'success';
     }
 
@@ -1634,7 +1640,9 @@ class Module
 
         $storageBytes = !empty($row->storage_zone_id) ? self::storageForMonth($row->service_id, $month) : 0;
         $storageGb = self::bytesToGb($storageBytes);
-        $storageCost = round($storageGb * self::pricePerStorageGb(), 2);
+        // Each replica is another stored copy that bunny.net bills
+        $copies = 1 + count(self::decodeList($row->storage_replicas ?? ''));
+        $storageCost = round($storageGb * $copies * self::pricePerStorageGb(), 2);
 
         $cost = round($bandwidthCost + $storageCost, 2);
         $currency = self::clientCurrency($service->userid);
@@ -1688,8 +1696,9 @@ class Module
         }
         if ($clientStorage > 0) {
             $n++;
-            $invoice["itemdescription{$n}"] = sprintf('CDN storage for %s (%s): %s GB @ %s/GB per month',
+            $invoice["itemdescription{$n}"] = sprintf('CDN storage for %s (%s): %s GB%s @ %s/GB per month',
                 $row->domain, date('F Y', strtotime($from)), number_format($storageGb, 2),
+                $copies > 1 ? " x {$copies} regions" : '',
                 self::formatMoney(self::toClientCurrency(self::pricePerStorageGb(), $currency), $currency));
             $invoice["itemamount{$n}"] = $clientStorage;
             $invoice["itemtaxed{$n}"] = $taxed;
@@ -1813,6 +1822,8 @@ class Module
             'allowedReferrers' => implode("\n", (array) ($z['AllowedReferrers'] ?? [])),
             'blockNoneReferrer' => !empty($z['BlockNoneReferrer']),
             'blockedIps' => implode("\n", (array) ($z['BlockedIps'] ?? [])),
+            'logging' => !empty($z['EnableLogging']),
+            'logAnonymize' => !array_key_exists('LoggingIPAnonymizationEnabled', $z) || !empty($z['LoggingIPAnonymizationEnabled']),
             // Performance
             'originShield' => !empty($z['EnableOriginShield']),
             'staleUpdating' => !empty($z['UseStaleWhileUpdating']),
@@ -2005,6 +2016,8 @@ class Module
         $update['ConnectionLimitPerIPCount'] = self::intSetting($in, 'connectionLimit', 'Connections per IP', 0, 1000);
         $update['RequestLimit'] = self::intSetting($in, 'requestLimit', 'Requests per second per IP', 0, 10000);
         $update['LimitRatePerSecond'] = self::intSetting($in, 'speedLimit', 'Download speed limit', 0, 1000000);
+        $update['EnableLogging'] = self::isOn($in['logging'] ?? '');
+        $update['LoggingIPAnonymizationEnabled'] = self::isOn($in['logAnonymize'] ?? '');
 
         $bunny->updatePullZone($row->pull_zone_id, $update);
         if (isset($update['OriginUrl'])) {
@@ -2222,6 +2235,358 @@ class Module
         }
         logActivity("SeekaHost CDN: linked existing pull zone {$pullZoneId} to service #{$serviceId}");
         return $row;
+    }
+
+    // ======================================================== Detailed stats
+
+    /** Countries, response codes and origin figures from a /statistics response (loadErrors). */
+    public static function statsExtras(array $stats)
+    {
+        $countries = [];
+        $total = 0;
+        foreach ((array) ($stats['GeoTrafficDistribution'] ?? []) as $key => $bytes) {
+            $code = preg_match('/\(([A-Z]{2})\)\s*$/', (string) $key, $m) ? $m[1] : (preg_match('/^[A-Z]{2}$/', (string) $key) ? $key : '');
+            $label = $code !== '' && strlen((string) $key) > 2 ? trim(preg_replace('/^[A-Z]{2}:\s*/', '', preg_replace('/\s*\([A-Z]{2}\)\s*$/', '', (string) $key))) : (string) $key;
+            $countries[] = ['code' => $code, 'name' => $label, 'bytes' => (int) $bytes];
+            $total += (int) $bytes;
+        }
+        usort($countries, function ($a, $b) { return $b['bytes'] <=> $a['bytes']; });
+        $countries = array_slice($countries, 0, 10);
+        foreach ($countries as &$c) {
+            $c['percent'] = $total > 0 ? round($c['bytes'] / $total * 100, 1) : 0;
+            $c['bandwidth'] = self::formatBytes($c['bytes']);
+        }
+        unset($c);
+
+        $sum = function ($key) use ($stats) {
+            return (int) array_sum(array_map('intval', (array) ($stats[$key] ?? [])));
+        };
+        $requests = (int) ($stats['TotalRequestsServed'] ?? 0);
+        $errors = ['3xx' => $sum('Error3xxChart'), '4xx' => $sum('Error4xxChart'), '5xx' => $sum('Error5xxChart')];
+        return [
+            'countries' => $countries,
+            'responses' => [
+                '2xx' => max(0, $requests - array_sum($errors)),
+                '3xx' => $errors['3xx'], '4xx' => $errors['4xx'], '5xx' => $errors['5xx'],
+            ],
+            'originTraffic' => self::formatBytes((int) ($stats['TotalOriginTraffic'] ?? 0)),
+            'originResponseMs' => (int) round((float) ($stats['AverageOriginResponseTime'] ?? 0)),
+        ];
+    }
+
+    // ================================================================== DNSSEC
+
+    /** Enable DNSSEC and remember the DS record the client must add at their registrar. */
+    public static function enableDnssec($row, BunnyClient $bunny)
+    {
+        $res = $bunny->enableDnssec($row->dns_zone_id);
+        $ds = [];
+        foreach (['DsRecord', 'Digest', 'DigestType', 'Algorithm', 'PublicKey', 'KeyTag', 'Flags'] as $k) {
+            if (isset($res[$k]) && $res[$k] !== '') {
+                $ds[$k] = (string) $res[$k];
+            }
+        }
+        if (empty($ds['DsRecord']) && isset($ds['KeyTag'], $ds['Algorithm'], $ds['DigestType'], $ds['Digest'])) {
+            $ds['DsRecord'] = "{$ds['KeyTag']} {$ds['Algorithm']} {$ds['DigestType']} {$ds['Digest']}";
+        }
+        self::touchZone($row->service_id, ['dnssec' => json_encode($ds)]);
+        logActivity("SeekaHost CDN: DNSSEC enabled for {$row->domain} (service #{$row->service_id})");
+        return $ds;
+    }
+
+    public static function disableDnssec($row, BunnyClient $bunny)
+    {
+        $bunny->disableDnssec($row->dns_zone_id);
+        self::touchZone($row->service_id, ['dnssec' => null]);
+        logActivity("SeekaHost CDN: DNSSEC disabled for {$row->domain} (service #{$row->service_id})");
+    }
+
+    public static function dnssecInfo($row)
+    {
+        $ds = json_decode((string) ($row->dnssec ?? ''), true);
+        return is_array($ds) ? $ds : null;
+    }
+
+    // ============================================================= Zone files
+
+    private static function zoneOwnerName($name)
+    {
+        return $name === '' ? '@' : $name;
+    }
+
+    private static function fqdn($host)
+    {
+        return rtrim($host, '.') . '.';
+    }
+
+    /** BIND zone file of the client's records (CDN records are listed as comments). */
+    public static function exportZone($row, BunnyClient $bunny)
+    {
+        $lines = [
+            '; Zone file for ' . $row->domain . ' exported ' . gmdate('Y-m-d H:i') . ' UTC',
+            '$ORIGIN ' . self::fqdn($row->domain),
+            '$TTL 3600',
+            '',
+        ];
+        foreach (self::presentRecords($bunny->getDnsRecords($row->dns_zone_id)) as $r) {
+            $name = str_pad(self::zoneOwnerName($r['name']), 24);
+            $ttl = str_pad((string) max(60, $r['ttl']), 6);
+            switch ($r['type']) {
+                case BunnyClient::REC_A: $data = "A\t{$r['value']}"; break;
+                case BunnyClient::REC_AAAA: $data = "AAAA\t{$r['value']}"; break;
+                case BunnyClient::REC_CNAME: $data = "CNAME\t" . self::fqdn($r['value']); break;
+                case BunnyClient::REC_MX: $data = "MX\t{$r['priority']} " . self::fqdn($r['value']); break;
+                case BunnyClient::REC_SRV: $data = "SRV\t{$r['priority']} {$r['weight']} {$r['port']} " . self::fqdn($r['value']); break;
+                case BunnyClient::REC_CAA: $data = "CAA\t{$r['flags']} {$r['tag']} \"" . addcslashes($r['value'], '"\\') . '"'; break;
+                case BunnyClient::REC_TXT:
+                    $chunks = array_map(function ($c) { return '"' . addcslashes($c, '"\\') . '"'; }, str_split($r['value'], 255) ?: ['']);
+                    $data = "TXT\t" . implode(' ', $chunks);
+                    break;
+                default:
+                    $lines[] = '; ' . trim($name) . ' ' . $r['typeName'] . ' ' . $r['value'] . ' (managed by the CDN)';
+                    continue 2;
+            }
+            $lines[] = $name . ' ' . $ttl . ' IN  ' . $data;
+        }
+        return implode("\n", $lines) . "\n";
+    }
+
+    /** Split one zone-file line into tokens, keeping quoted strings together. */
+    private static function zoneTokens($line)
+    {
+        preg_match_all('/"((?:[^"\\\\]|\\\\.)*)"|(\S+)/', $line, $m, PREG_SET_ORDER);
+        $tokens = [];
+        foreach ($m as $t) {
+            $tokens[] = isset($t[2]) && $t[2] !== '' ? ['v' => $t[2], 'q' => false] : ['v' => stripcslashes($t[1]), 'q' => true];
+        }
+        return $tokens;
+    }
+
+    /**
+     * Import a BIND zone file: A, AAAA, CNAME, TXT, MX, SRV and CAA records are
+     * validated like hand-entered ones and added if missing; SOA/NS and others are skipped.
+     */
+    public static function importZone($row, BunnyClient $bunny, $text)
+    {
+        $text = (string) $text;
+        if (strlen($text) > 262144) {
+            throw new \InvalidArgumentException('The zone file is too large (maximum 256 KB).');
+        }
+        // Strip comments outside quotes and join parenthesised continuation lines
+        $clean = '';
+        $inQuote = false;
+        $depth = 0;
+        $len = strlen($text);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $text[$i];
+            if ($ch === '\\' && $inQuote && $i + 1 < $len) {
+                $clean .= $ch . $text[++$i];
+                continue;
+            }
+            if ($ch === '"') {
+                $inQuote = !$inQuote;
+            } elseif (!$inQuote && $ch === ';') {
+                while ($i + 1 < $len && $text[$i + 1] !== "\n") {
+                    $i++;
+                }
+                continue;
+            } elseif (!$inQuote && ($ch === '(' || $ch === ')')) {
+                $depth += $ch === '(' ? 1 : -1;
+                $clean .= ' ';
+                continue;
+            } elseif ($ch === "\n" && $depth > 0) {
+                $clean .= ' ';
+                continue;
+            }
+            $clean .= $ch === "\r" ? '' : $ch;
+        }
+
+        $origin = self::fqdn($row->domain);
+        $defaultTtl = 3600;
+        $owner = '@';
+        $types = ['A' => 0, 'AAAA' => 1, 'CNAME' => 2, 'TXT' => 3, 'MX' => 4, 'SRV' => 8, 'CAA' => 9];
+        $records = [];
+        $skipped = 0;
+        $errors = [];
+        foreach (explode("\n", $clean) as $n => $line) {
+            if (trim($line) === '') {
+                continue;
+            }
+            $tokens = self::zoneTokens($line);
+            if (strtoupper($tokens[0]['v']) === '$ORIGIN') {
+                $origin = self::fqdn($tokens[1]['v'] ?? $origin);
+                continue;
+            }
+            if (strtoupper($tokens[0]['v']) === '$TTL') {
+                $defaultTtl = (int) ($tokens[1]['v'] ?? 3600);
+                continue;
+            }
+            if (count($records) + $skipped > 2000) {
+                throw new \InvalidArgumentException('The zone file has too many records (maximum 2000).');
+            }
+            // Owner is omitted when the line starts with whitespace
+            if (!preg_match('/^\s/', $line)) {
+                $owner = array_shift($tokens)['v'];
+            }
+            $ttl = $defaultTtl;
+            while ($tokens && !isset($types[strtoupper($tokens[0]['v'])])) {
+                $t = strtoupper($tokens[0]['v']);
+                if (ctype_digit($t)) {
+                    $ttl = (int) $t;
+                } elseif (!in_array($t, ['IN', 'CH', 'HS'], true)) {
+                    break; // a type we do not import (SOA, NS, ...)
+                }
+                array_shift($tokens);
+            }
+            if (!$tokens || !isset($types[strtoupper($tokens[0]['v'])])) {
+                $skipped++;
+                continue;
+            }
+            $type = strtoupper(array_shift($tokens)['v']);
+
+            // Owner name relative to the service domain
+            $fq = $owner === '@' ? $origin : (substr($owner, -1) === '.' ? $owner : $owner . '.' . $origin);
+            $fq = strtolower(rtrim($fq, '.'));
+            if ($fq === $row->domain) {
+                $name = '';
+            } elseif (substr($fq, -strlen('.' . $row->domain)) === '.' . $row->domain) {
+                $name = substr($fq, 0, -strlen('.' . $row->domain));
+            } else {
+                $skipped++; // outside this zone
+                continue;
+            }
+            $target = function ($v) use ($origin) {
+                return $v === '@' ? rtrim($origin, '.') : (substr($v, -1) === '.' ? rtrim($v, '.') : $v . '.' . rtrim($origin, '.'));
+            };
+            $in = ['type' => $types[$type], 'name' => $name === '' ? '@' : $name, 'ttl' => $ttl];
+            $v = array_column($tokens, 'v');
+            switch ($type) {
+                case 'MX': $in += ['priority' => $v[0] ?? 10, 'value' => $target($v[1] ?? '')]; break;
+                case 'SRV': $in += ['priority' => $v[0] ?? 0, 'weight' => $v[1] ?? 0, 'port' => $v[2] ?? 0, 'value' => $target($v[3] ?? '')]; break;
+                case 'CAA': $in += ['flags' => $v[0] ?? 0, 'tag' => $v[1] ?? 'issue', 'value' => $v[2] ?? '']; break;
+                case 'CNAME': $in['value'] = $target($v[0] ?? ''); break;
+                case 'TXT': $in['value'] = implode('', $v); break;
+                default: $in['value'] = $v[0] ?? '';
+            }
+            try {
+                $records[] = self::buildRecord($in, $row->domain, $row->pull_zone_id, $row->cdn_url);
+            } catch (\InvalidArgumentException $e) {
+                $errors[] = 'Line ' . ($n + 1) . ': ' . $e->getMessage();
+            }
+        }
+        $res = self::importRecords($bunny, $row->dns_zone_id, $records, false);
+        $res['skipped'] = $skipped;
+        $res['failed'] = array_merge($errors, $res['failed']);
+        return $res;
+    }
+
+    // ============================================================ File manager
+
+    /** Validate a storage path from the client: no "..", control characters or odd names. */
+    public static function storagePath($path)
+    {
+        $parts = [];
+        foreach (explode('/', str_replace('\\', '/', (string) $path)) as $seg) {
+            $seg = trim($seg);
+            if ($seg === '') {
+                continue;
+            }
+            if ($seg === '.' || $seg === '..' || strlen($seg) > 255 || preg_match('/[\x00-\x1f\x7f<>:"|?*]/', $seg)) {
+                throw new \InvalidArgumentException('Invalid file or folder name: ' . $seg);
+            }
+            $parts[] = $seg;
+        }
+        if (count($parts) > 20) {
+            throw new \InvalidArgumentException('Folders are nested too deeply.');
+        }
+        return implode('/', $parts);
+    }
+
+    /** Storage client authenticated with the storage zone's own password. */
+    public static function storageClient($row, BunnyClient $bunny)
+    {
+        if (empty($row->storage_zone_id)) {
+            throw new \InvalidArgumentException('This CDN has no storage zone.');
+        }
+        require_once __DIR__ . '/StorageClient.php';
+        $z = $bunny->getStorageZone($row->storage_zone_id);
+        return new StorageClient((string) ($z['StorageHostname'] ?? 'storage.bunnycdn.com'), (string) ($z['Name'] ?? $row->storage_zone_name), (string) ($z['Password'] ?? ''));
+    }
+
+    public static function listFiles($row, BunnyClient $bunny, $path)
+    {
+        $path = self::storagePath($path);
+        $hosts = self::decodeList($row->hostnames);
+        $publicHost = ($hosts && $row->nameservers_detected) ? $hosts[0] : $row->cdn_url;
+        $items = [];
+        foreach (self::storageClient($row, $bunny)->listFolder($path) as $o) {
+            $name = (string) ($o['ObjectName'] ?? '');
+            $isDir = !empty($o['IsDirectory']);
+            $full = ltrim($path . '/' . $name, '/');
+            $items[] = [
+                'name' => $name,
+                'path' => $full,
+                'dir' => $isDir,
+                'size' => $isDir ? '' : self::formatBytes((int) ($o['Length'] ?? 0)),
+                'modified' => !empty($o['LastChanged']) ? date('Y-m-d H:i', strtotime($o['LastChanged'])) : '',
+                'url' => $isDir ? '' : 'https://' . $publicHost . '/' . implode('/', array_map('rawurlencode', explode('/', $full))),
+            ];
+        }
+        usort($items, function ($a, $b) {
+            return [$b['dir'], strtolower($a['name'])] <=> [$a['dir'], strtolower($b['name'])];
+        });
+        return ['path' => $path, 'items' => $items];
+    }
+
+    /** Largest upload PHP accepts, in bytes. */
+    public static function maxUploadBytes()
+    {
+        $toBytes = function ($v) {
+            $v = trim((string) $v);
+            $n = (float) $v;
+            switch (strtolower(substr($v, -1))) {
+                case 'g': $n *= 1024;
+                    // fall through
+                case 'm': $n *= 1024;
+                    // fall through
+                case 'k': $n *= 1024;
+            }
+            return (int) $n;
+        };
+        $limits = array_filter([$toBytes(ini_get('upload_max_filesize')), $toBytes(ini_get('post_max_size'))]);
+        return $limits ? min($limits) : 2097152;
+    }
+
+    // ============================================================= Replication
+
+    public static $storageRegions = ['DE', 'UK', 'SE', 'NY', 'LA', 'SG', 'SYD', 'BR', 'JH'];
+
+    /** Replication regions from the product setting, e.g. "NY, SG" (main region excluded). */
+    public static function replicaRegions(array $params)
+    {
+        $main = self::storageRegion($params);
+        $out = [];
+        foreach (preg_split('/[\s,]+/', strtoupper((string) ($params['configoption7'] ?? ''))) as $r) {
+            if (in_array($r, self::$storageRegions, true) && $r !== $main) {
+                $out[] = $r;
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
+    /** Add replication regions to an existing storage zone (bunny.net cannot remove them). */
+    public static function applyReplication($row, BunnyClient $bunny, array $regions)
+    {
+        $current = self::decodeList($row->storage_replicas ?? '');
+        $new = array_values(array_diff($regions, $current));
+        if (!$new || empty($row->storage_zone_id)) {
+            return $current;
+        }
+        $all = array_values(array_unique(array_merge($current, $new)));
+        $bunny->updateStorageZone($row->storage_zone_id, ['ReplicationZones' => $all]);
+        self::touchZone($row->service_id, ['storage_replicas' => json_encode($all)]);
+        logActivity("SeekaHost CDN: storage replication for {$row->domain} now " . implode(', ', $all));
+        return $all;
     }
 
     // ======================================================= Client DNS input
