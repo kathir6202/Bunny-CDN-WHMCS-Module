@@ -34,7 +34,9 @@ class StorageClient
     /** URL for a path made of already validated segments. */
     private function url($path, $isDir = false)
     {
-        $segments = array_filter(explode('/', $path), 'strlen');
+        $segments = array_filter(explode('/', $path), function ($s) {
+            return $s !== '';
+        });
         $encoded = implode('/', array_map('rawurlencode', $segments));
         // Folders end with "/"; the root is ".../{zone}/"
         return $this->base . '/' . rawurlencode($this->zone) . '/' . $encoded . ($isDir && $encoded !== '' ? '/' : '');

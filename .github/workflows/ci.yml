@@ -44,7 +44,7 @@ jobs:
       - name: Install PHPCompatibility
         run: |
           mkdir -p "$RUNNER_TEMP/phpcompat" && cd "$RUNNER_TEMP/phpcompat"
-          echo '{"minimum-stability":"dev","prefer-stable":true,"require":{"squizlabs/php_codesniffer":"^4.0","phpcompatibility/php-compatibility":"dev-develop"}}' > composer.json
+          echo '{"minimum-stability":"dev","prefer-stable":true,"config":{"allow-plugins":{"dealerdirect/phpcodesniffer-composer-installer":false}},"require":{"squizlabs/php_codesniffer":"^4.0","phpcompatibility/php-compatibility":"dev-develop"}}' > composer.json
           composer install --no-interaction --no-progress --quiet
       - name: Scan module
         run: |
