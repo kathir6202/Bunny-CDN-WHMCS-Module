@@ -81,6 +81,9 @@ Extract the release zip in the WHMCS root folder; both folders land in place.
 - Clients never see bunny.net costs. Email texts are editable under Email Templates (Product):
   *SeekaHost CDN Bandwidth Warning* and *SeekaHost CDN Bandwidth Limit Reached*.
 
+Continuous checks: GitHub Actions (`.github/workflows/ci.yml`) runs a PHP 7.4–8.4 syntax check, the
+PHP compatibility scan, PHPStan (level 5) and the test suite on SQLite and MariaDB for every push.
+
 Testing: `tests/run.sh` runs the end-to-end test suite against a local fake bunny.net API
 (PHP 8 with pdo_sqlite, composer and node required). It is not part of the release zip.
 

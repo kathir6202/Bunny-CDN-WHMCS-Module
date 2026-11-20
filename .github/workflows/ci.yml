@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: PHP ${{ matrix.php }} syntax
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+      - name: Lint every PHP file
+        run: |
+          status=0
+          for f in $(find modules -name '*.php'); do
+            php -l "$f" > /dev/null || status=1
+          done
+          exit $status
+
+  compatibility:
+    name: PHP 7.4-8.4 compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer
+      - name: Install PHPCompatibility
+        run: |
+          mkdir -p "$RUNNER_TEMP/phpcompat" && cd "$RUNNER_TEMP/phpcompat"
+          echo '{"minimum-stability":"dev","prefer-stable":true,"require":{"squizlabs/php_codesniffer":"^4.0","phpcompatibility/php-compatibility":"dev-develop"}}' > composer.json
+          composer install --no-interaction --no-progress --quiet
+      - name: Scan module
+        run: |
+          T="$RUNNER_TEMP/phpcompat"
+          "$T/vendor/bin/phpcs" --runtime-set installed_paths "$T/vendor/phpcompatibility/php-compatibility" \
+            --standard=PHPCompatibility --runtime-set testVersion 7.4-8.4 --extensions=php modules
+
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer
+      - name: Install test dependencies (database layer, Smarty) and PHPStan
+        run: |
+          composer install --working-dir=tests --no-interaction --no-progress
+          composer require --working-dir="$RUNNER_TEMP" --no-interaction --no-progress phpstan/phpstan:^2.0
+      - name: Analyse
+        run: |
+          "$RUNNER_TEMP/vendor/bin/phpstan" analyse -c tests/phpstan/phpstan.neon \
+            --no-progress --error-format=github --memory-limit=1G
+
+  tests:
+    name: Tests (${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, mariadb]
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_USER: sht
+          MARIADB_PASSWORD: sht
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, pdo_mysql, curl, openssl
+          coverage: none
+          tools: composer
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare MariaDB (strict mode, test user may create the test database)
+        if: matrix.db == 'mariadb'
+        run: |
+          mysql -h127.0.0.1 -uroot -proot -e "GRANT ALL ON *.* TO 'sht'@'%'; FLUSH PRIVILEGES;
+            SET GLOBAL sql_mode='STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';"
+      - name: Install test dependencies
+        run: composer install --working-dir=tests --no-interaction --no-progress
+      - name: Run test suite
+        env:
+          SHT_DB: ${{ matrix.db == 'mariadb' && 'mysql' || '' }}
+        run: tests/run.sh

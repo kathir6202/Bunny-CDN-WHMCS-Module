@@ -1,0 +1,8 @@
+parameters:
+    level: 5
+    paths:
+        - ../../modules
+    bootstrapFiles:
+        - stubs.php
+    # Values read from WHMCS's database are untyped; trust code, not docblocks
+    treatPhpDocTypesAsCertain: false
